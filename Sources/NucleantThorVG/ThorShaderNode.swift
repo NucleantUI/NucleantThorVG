@@ -21,7 +21,11 @@ public protocol VulkanThorRenderNode: VulkanRenderNode {
 /// render-affecting state (`dirty`, the compute trio) — canvas-side code
 /// keeps writing `node.dirty = true` and the slot notices on its own.
 @Observable
-public final class ThorShaderNode: VulkanThorRenderNode , @unchecked Sendable {
+public final class ThorShaderNode<C: RenderContainerNode>: VulkanThorRenderNode , @unchecked Sendable {
+    
+    
+    public typealias ContainerNode = C
+    public typealias Engine = VulkanRenderEngine<C>
 
     public var canvas: ThorVulkanCanvas
     public let width:  UInt32
@@ -96,6 +100,98 @@ public final class ThorShaderNode: VulkanThorRenderNode , @unchecked Sendable {
         self.computePipeline      = computePipeline
         self.computeLayout        = computeLayout
         self.computeDescriptorSet = computeDescriptorSet
+    }
+}
+
+
+extension ThorShaderNode {
+    public func update(_ engine: Engine, slot: ContainerNode, cmd: VkCommandBuffer) {
+        // let id = ObjectIdentifier(node).hashValue
+        // ^ replaced: the slot carries the canvas-owned id.
+        let id = slot.id
+        // guard node.dirty else { return }
+        // ^ the dirty marker moved up to the slot — Observation on the
+        //   shader node feeds it (see RenderNode.observe).
+        guard slot.needsRender else { return }
+        let drawResult = canvas.draw()
+        let syncResult = drawResult == TVG_RESULT_SUCCESS ? canvas.sync() : drawResult
+        guard drawResult == TVG_RESULT_SUCCESS, syncResult == TVG_RESULT_SUCCESS else {
+            if engine.warnedFailedNodes.insert(id).inserted {
+                print("VulkanRenderEngine: thor node \(id) failed rendering (draw: \(drawResult), sync: \(syncResult)) — logged once; this repeats every frame if nothing is ever painted into the node's canvas")
+            }
+            return
+        }
+        engine.warnedFailedNodes.remove(id)
+        // node.dirty = false
+        // ^ must NOT write back to the shader node: the slot observes it,
+        //   so an engine-side write would fire onChange and re-mark the
+        //   slot dirty — a permanent redraw loop. The engine consumes the
+        //   slot's flag only.
+        // slot.needsRender = false
+        // ^ deliberately NOT cleared for now: nothing drives per-frame
+        //   updates yet (tetris side isn't wired up), so slots stay
+        //   permanently dirty and every node redraws every frame — which
+        //   is also the intended leak-amplifier mode while leaks are
+        //   hunted. Re-enable clearing once the canvas side really drives
+        //   updates through the Observation chain.
+       waitForExternalCompletion?()
+
+        // Barriers must declare the layout the image is *really* in right
+        // now — node.currentLayout, not an assumption. An externally-backed
+        // image's writer (Metal, via wgpu-native) never goes through our
+        // Vulkan command stream, so on its very first draw the only
+        // trustworthy claim is GENERAL (set at import time): valid as a
+        // source for any prior access, and — unlike UNDEFINED — never
+        // permits the driver to discard content. On every frame after
+        // that, currentLayout correctly reflects where the previous
+        // barrier below actually left it.
+        let priorLayout  = currentLayout
+        let priorAccess: VkAccessFlags = isExternallyBacked
+            ? VkAccessFlags(VK_ACCESS_MEMORY_WRITE_BIT.rawValue) | VkAccessFlags(VK_ACCESS_MEMORY_READ_BIT.rawValue)
+            : VkAccessFlags(VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT.rawValue)
+
+        if let pipeline = computePipeline,
+           let layout   = computeLayout,
+           let ds       = computeDescriptorSet {
+
+            engineImageBarrier(
+                cmd,
+                image:     image,
+                srcLayout: priorLayout,
+                srcAccess: priorAccess,
+                srcStage:  VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+                dstLayout: VK_IMAGE_LAYOUT_GENERAL,
+                dstAccess: VkAccessFlags(VK_ACCESS_SHADER_READ_BIT.rawValue) | VkAccessFlags(VK_ACCESS_SHADER_WRITE_BIT.rawValue),
+                dstStage:  VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT
+            )
+            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline)
+            var descSet: VkDescriptorSet? = ds
+            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, layout, 0, 1, &descSet, 0, nil)
+            vkCmdDispatch(cmd, (width + 7) / 8, (height + 7) / 8, 1)
+            engineImageBarrier(
+                cmd,
+                image:     image,
+                srcLayout: VK_IMAGE_LAYOUT_GENERAL,
+                srcAccess: VkAccessFlags(VK_ACCESS_SHADER_WRITE_BIT.rawValue),
+                srcStage:  VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                dstLayout: VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                dstAccess: VkAccessFlags(VK_ACCESS_SHADER_READ_BIT.rawValue),
+                dstStage:  VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT
+            )
+        } else {
+            engineImageBarrier(
+                cmd,
+                image:     image,
+                srcLayout: priorLayout,
+                srcAccess: priorAccess,
+                srcStage:  VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+                dstLayout: VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                dstAccess: VkAccessFlags(VK_ACCESS_SHADER_READ_BIT.rawValue),
+                dstStage:  VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT
+            )
+        }
+        currentLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
+        engine.readable.insert(id)
     }
 }
 
