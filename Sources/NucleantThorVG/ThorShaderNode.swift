@@ -75,6 +75,15 @@ public final class ThorShaderNode<C: RenderContainerNode>: VulkanThorRenderNode 
     /// the same memory with nothing ordering them.
     public var waitForExternalCompletion: (() -> Void)?
 
+    /// Drops the wgpu render target this node's image was imported from.
+    /// The node owns that target (the "belongs in the ShaderNode" contract):
+    /// its VkImage aliases the target's Metal memory, so the target must
+    /// outlive the image and be released only after `destroyResources` frees
+    /// it. The closure captures the wgpu `Target` (and its release), keeping
+    /// all webgpu types inside the factory that built the node — the node
+    /// itself never names one.
+    public var releaseExternal: (() -> Void)?
+
     public init(
         canvas:               ThorVulkanCanvas,
         width:                UInt32,
@@ -192,6 +201,22 @@ extension ThorShaderNode {
         }
         currentLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
         engine.readable.insert(id)
+    }
+
+    /// Free the image/view/memory this node owns. The wgpu texture an
+    /// externally-backed image was imported from, and the `Tvg_Canvas`
+    /// handed out to Python, are borrowed — the owning canvas releases
+    /// those (after retargeting ThorVG away from the texture), not this.
+    public func destroyResources(_ engine: Engine) {
+        vkDeviceWaitIdle(engine.device)
+        vkDestroyImageView(engine.device, imageView, nil)
+        vkDestroyImage(engine.device, image, nil)
+        if let memory {
+            vkFreeMemory(engine.device, memory, nil)
+        }
+        // Only now, with the aliasing VkImage gone, is it safe to drop the
+        // wgpu target backing it.
+        releaseExternal?()
     }
 }
 
