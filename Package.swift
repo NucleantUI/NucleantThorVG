@@ -4,7 +4,7 @@
 import PackageDescription
 
 let devMode = false
-let branch = "refactor"
+let branch = "master"
 
 func getDepedencies() -> [Package.Dependency] {
     var deps = [Package.Dependency]()
