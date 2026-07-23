@@ -3,9 +3,16 @@
 
 import PackageDescription
 
+let devMode = false
+let branch = "refactor"
+
 func getDepedencies() -> [Package.Dependency] {
     var deps = [Package.Dependency]()
-    deps.append(.package(path: "../NucleantVulkan"))
+    if devMode {
+        deps.append(.package(path: "../NucleantVulkan"))
+    } else {
+        deps.append(.package(url: "https://github.com/NucleantUI/NucleantVulkan", branch: branch))
+    }
     //deps.append(.package(path: "../NucleantCore"))
     return deps
 }
