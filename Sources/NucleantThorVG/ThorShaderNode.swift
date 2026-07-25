@@ -9,8 +9,8 @@ import Observation
 public protocol VulkanThorRenderNode: VulkanRenderNode {
     associatedtype CanvasSurface: ThorGPUCanvas
     var canvas: CanvasSurface { get }
-    var width:  UInt32        { get }
-    var height: UInt32        { get }
+    var width:  UInt32        { get set }
+    var height: UInt32        { get set }
 }
 /// The engine's single node type: a ThorVG GPU canvas rendering into a
 /// VkImage, plus an optional compute shader post-process. Conforms to
@@ -28,16 +28,16 @@ public final class ThorShaderNode<C: RenderContainerNode>: VulkanThorRenderNode 
     public typealias Engine = VulkanRenderEngine<C>
 
     public var canvas: ThorVulkanCanvas
-    public let width:  UInt32
-    public let height: UInt32
+    public var width:  UInt32
+    public var height: UInt32
 
-    public let image:                VkImage
-    public let imageView:            VkImageView
+    public var image:                VkImage
+    public var imageView:            VkImageView
     /// The allocation backing `image` — the engine binds but never frees
     /// it, so the node carries the handle for whoever tears the node down
     /// (resize, detach). For imported textures this is the import
     /// allocation, not memory the engine really owns.
-    public let memory:               VkDeviceMemory?
+    public var memory:               VkDeviceMemory?
     public var computePipeline:      VkPipeline?
     public var computeLayout:        VkPipelineLayout?
     public var computeDescriptorSet: VkDescriptorSet?
