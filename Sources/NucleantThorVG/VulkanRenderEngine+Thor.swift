@@ -89,21 +89,22 @@ extension VulkanRenderEngine {
         return node
     }
 
-    /// Create a `ThorShaderNode` whose VkImage is *imported* from an existing
-    /// `id<MTLTexture>` (via VK_EXT_metal_objects) rather than allocated, so
-    /// the composite pass reads the exact GPU memory ThorVG rendered into —
-    /// no copy. `mtlTexture` is the raw `id<MTLTexture>` pointer, format
-    /// BGRA8Unorm, matching `width`/`height`. `VkImportMetalTextureInfoEXT`
-    /// has an Objective-C field that doesn't import into this plain-C target,
-    /// so its 32-byte layout is laid out by hand: sType@0, pNext@8, plane@16,
-    /// mtlTexture@24 — the same shape as `VkMetalSurfaceCreateInfoEXT`.
-    func makeThorNode(
-        canvas:               Tvg_Canvas,
-        importingMetalTexture mtlTexture: UnsafeMutableRawPointer,
-        width:                Int,
-        height:               Int,
-        storageCapable:       Bool = false
-    ) throws -> ThorShaderNode<RenderNode> {
+    /// Just the imported VkImage + view + memory from an existing
+    /// `id<MTLTexture>` (via VK_EXT_metal_objects) — no copy, the composite
+    /// samples the exact GPU memory ThorVG drew into. Extracted so both node
+    /// creation (`makeThorNode`) and in-place resize (`resizeThorNode`) mint
+    /// the image the same way. `mtlTexture` is the raw `id<MTLTexture>`
+    /// pointer, format BGRA8Unorm, matching `width`/`height`.
+    /// `VkImportMetalTextureInfoEXT` has an Objective-C field that doesn't
+    /// import into this plain-C target, so its 32-byte layout is laid out by
+    /// hand: sType@0, pNext@8, plane@16, mtlTexture@24 — the same shape as
+    /// `VkMetalSurfaceCreateInfoEXT`.
+    func makeImportedImage(
+        mtlTexture:     UnsafeMutableRawPointer,
+        width:          Int,
+        height:         Int,
+        storageCapable: Bool = false
+    ) throws -> (image: VkImage, view: VkImageView, memory: VkDeviceMemory?) {
         let importInfo = UnsafeMutableRawPointer.allocate(byteCount: 32, alignment: MemoryLayout<UInt>.alignment)
         defer { importInfo.deallocate() }
         importInfo.initializeMemory(as: UInt8.self, repeating: 0, count: 32)
@@ -201,16 +202,151 @@ extension VulkanRenderEngine {
             )
         }
 
+        return (image, view, memory)
+    }
+
+    /// Create a `ThorShaderNode` whose VkImage is *imported* from an existing
+    /// `id<MTLTexture>` (via VK_EXT_metal_objects) rather than allocated. The
+    /// image itself is minted by `makeImportedImage`; this wraps it in a node
+    /// bound to `canvas`.
+    func makeThorNode(
+        canvas:               Tvg_Canvas,
+        importingMetalTexture mtlTexture: UnsafeMutableRawPointer,
+        width:                Int,
+        height:               Int,
+        storageCapable:       Bool = false
+    ) throws -> ThorShaderNode<RenderNode> {
+        let created = try makeImportedImage(
+            mtlTexture:     mtlTexture,
+            width:          width,
+            height:         height,
+            storageCapable: storageCapable
+        )
         return ThorShaderNode(
             canvas:             ThorVulkanCanvas(base: canvas),
             width:              UInt32(width),
             height:             UInt32(height),
-            image:              image,
-            imageView:          view,
-            memory:             memory,
+            image:              created.image,
+            imageView:          created.view,
+            memory:             created.memory,
             isExternallyBacked: true,
             storageCapable:     storageCapable
         )
+    }
+
+    /// Resize an existing ThorVG node **in place**: mint a new wgpu target +
+    /// imported VkImage at the new size, point the node's own ThorVG canvas at
+    /// it, and swap the new GPU handles into the *same* `ThorShaderNode`. The
+    /// node keeps its identity — its id, its composite slot, its z-order, its
+    /// Observation registration — so nothing above needs rebinding; only the
+    /// backing image changes. A resize must not remake the node (that's for
+    /// widget add/remove or a canvas swap). The old image/view/memory and wgpu
+    /// target are freed once the swap lands and the device is idle. Returns
+    /// false — node untouched, still at the old size — on any failure, so the
+    /// widget stays visible instead of going dark.
+    ///
+    /// `id` is the node's composite slot id: the engine caches a sampler
+    /// descriptor per slot keyed on the assumption a node's imageView never
+    /// changes, so that cache is dropped here (`invalidateComposite`) to force
+    /// a rebuild from the new view.
+    @discardableResult
+    public func resizeThorNode(
+        _ node: ThorShaderNode<RenderNode>,
+        id:     Int,
+        width:  Int,
+        height: Int
+    ) -> Bool {
+        guard width > 0, height > 0,
+              node.width != UInt32(width) || node.height != UInt32(height)
+        else { return true }   // already that size — nothing to do
+
+        guard let wgpu = WgpuContext.shared else {
+            print("VulkanRenderEngine: no WgpuContext — thor node unresizable")
+            return false
+        }
+        guard let target = wgpu.makeTarget(width: width, height: height) else {
+            print("VulkanRenderEngine: wgpu target creation failed (resize)")
+            return false
+        }
+        guard let mtlTexture = target.nativeMetalTexture() else {
+            print("VulkanRenderEngine: wgpuTextureGetNativeMetalTexture returned null (resize)")
+            target.release()
+            return false
+        }
+
+        // New image at the new size — built before the old one is touched, so a
+        // failure here leaves the node drawing at the old size. Keep the node's
+        // fixed storage capability so the post shader's assumptions still hold.
+        let created: (image: VkImage, view: VkImageView, memory: VkDeviceMemory?)
+        do {
+            created = try makeImportedImage(
+                mtlTexture:     mtlTexture,
+                width:          width,
+                height:         height,
+                storageCapable: node.storageCapable
+            )
+        } catch {
+            print("VulkanRenderEngine: imported image (resize) failed: \(error)")
+            target.release()
+            return false
+        }
+
+        // Point the node's own ThorVG canvas at the new target — same
+        // `Tvg_Canvas`, so its paints and any Python-held capsules stay valid.
+        let result = tvg_wgcanvas_set_target(
+            node.canvas.base,
+            wgpu.devicePointer,
+            wgpu.instancePointer,
+            target.texturePointer,
+            UInt32(width),
+            UInt32(height),
+            TVG_COLORSPACE_ABGR8888S,
+            1
+        )
+        guard result == TVG_RESULT_SUCCESS else {
+            print("VulkanRenderEngine: tvg_wgcanvas_set_target failed on resize (\(result))")
+            vkDeviceWaitIdle(device)
+            vkDestroyImageView(device, created.view, nil)
+            vkDestroyImage(device, created.image, nil)
+            if let m = created.memory { vkFreeMemory(device, m, nil) }
+            target.release()
+            return false
+        }
+
+        // Hold the old handles; free them only after the device is idle so no
+        // in-flight command buffer still samples them.
+        let oldImage   = node.image
+        let oldView    = node.imageView
+        let oldMemory  = node.memory
+        let oldRelease = node.releaseExternal
+
+        vkDeviceWaitIdle(device)
+
+        // Swap the new backing into the existing node.
+        node.image                     = created.image
+        node.imageView                 = created.view
+        node.memory                    = created.memory
+        node.width                     = UInt32(width)
+        node.height                    = UInt32(height)
+        // Imported image starts life in GENERAL (makeImportedImage's barrier).
+        node.currentLayout             = VK_IMAGE_LAYOUT_GENERAL
+        node.waitForExternalCompletion = { wgpu.waitForGPUCompletion() }
+        node.releaseExternal           = { target.release() }
+        node.dirty                     = true
+
+        // Old backing + its wgpu target: safe to free now the node points
+        // elsewhere and the device is idle. Retarget-then-release order, same
+        // as node teardown.
+        vkDestroyImageView(device, oldView, nil)
+        vkDestroyImage(device, oldImage, nil)
+        if let oldMemory { vkFreeMemory(device, oldMemory, nil) }
+        oldRelease?()
+
+        // Cached sampler descriptor still points at the freed view — drop it so
+        // the next frame rebuilds from the new one, and clear the slot's
+        // readable flag until the node's next draw makes the new image readable.
+        invalidateComposite(id: id)
+        return true
     }
 }
 
