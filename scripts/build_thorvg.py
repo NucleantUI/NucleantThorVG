@@ -29,6 +29,7 @@ All remaining args are forwarded verbatim to build_thorvg.py.
 from __future__ import annotations
 
 import argparse
+import os
 import shutil
 import subprocess
 import sys
@@ -41,6 +42,19 @@ DEV_ROOT     = SULPHUR_ROOT.parent
 THORVG_CYTHON_DIR    = DEV_ROOT / "thorvg-cython"
 THORVG_CYTHON_REPO   = "https://github.com/kivy/thorvg-cython.git"
 THORVG_BUILD_SCRIPT  = THORVG_CYTHON_DIR / "tools" / "build_thorvg.py"
+
+# wgpu-native XCFramework (built by NucleantVulkan/scripts/build_wgpu.py) — the
+# ThorVG `wg` engine links against it. For iOS we stage its slices into the
+# per-arch layout build_thorvg.py's pkg-config wiring expects.
+WGPU_XCFRAMEWORK = DEV_ROOT / "NucleantVulkan" / "Dependencies" / "wgpu_native.xcframework"
+
+# iOS thorvg.xcframework build_thorvg.py emits, and where we fold it in.
+THORVG_IOS_XCFW  = THORVG_CYTHON_DIR / "thorvg" / "output" / "thorvg.xcframework"
+NUCLEANT_XCFW    = SULPHUR_ROOT / "output" / "ThorVG.xcframework"
+# iOS libomp.xcframework (dynamic OpenMP the iOS thorvg framework links) — copied
+# alongside so NucleantThorVG's Package.swift can embed libomp.framework on iOS.
+LIBOMP_IOS_XCFW  = THORVG_CYTHON_DIR / "thorvg" / "output" / "libomp.xcframework"
+NUCLEANT_LIBOMP  = SULPHUR_ROOT / "output" / "libomp.xcframework"
 
 # Where build_thorvg.py drops the macOS fat dylib
 THORVG_ROOT     = THORVG_CYTHON_DIR / "thorvg"
@@ -117,6 +131,109 @@ def _repackage_macos_xcframework() -> None:
     print("[sulphur] Repackage done.\n")
 
 
+def _stage_wgpu_ios() -> Path:
+    """Lay the wgpu XCFramework's iOS slices out the way build_thorvg.py's
+    per-slice pkg-config expects:
+
+        include/webgpu/{webgpu.h,wgpu.h}
+        lib/ios_arm64/libwgpu_native.dylib        (device arm64)
+        lib/ios_sim_arm64/libwgpu_native.dylib    (simulator arm64)
+        lib/ios_sim_x86_64/libwgpu_native.dylib   (simulator x86_64)
+
+    Each dylib keeps its @rpath/libwgpu_native.dylib install name so the built
+    ThorVG.framework references the same shared wgpu the engine embeds.
+    """
+    if not WGPU_XCFRAMEWORK.is_dir():
+        sys.exit(f"[sulphur] wgpu XCFramework not found at {WGPU_XCFRAMEWORK} — "
+                 f"run NucleantVulkan/scripts/build_wgpu.py first")
+
+    # Sibling of build_ios/ (which build_thorvg.py wipes on each run).
+    stage = THORVG_CYTHON_DIR / "thorvg" / "_wgpu_ios_stage"
+    if stage.exists():
+        shutil.rmtree(stage)
+    inc = stage / "include" / "webgpu"
+    inc.mkdir(parents=True)
+    hdrs = WGPU_XCFRAMEWORK / "ios-arm64" / "Headers"
+    for h in ("webgpu.h", "wgpu.h"):
+        shutil.copy2(hdrs / h, inc / h)
+
+    device = WGPU_XCFRAMEWORK / "ios-arm64" / "libwgpu_native.dylib"
+    sim    = WGPU_XCFRAMEWORK / "ios-arm64_x86_64-simulator" / "libwgpu_native.dylib"
+
+    def _put(src: Path, slice_name: str, thin_arch: str | None) -> None:
+        d = stage / "lib" / slice_name
+        d.mkdir(parents=True, exist_ok=True)
+        out = d / "libwgpu_native.dylib"
+        if thin_arch:
+            subprocess.run(["lipo", str(src), "-thin", thin_arch, "-output", str(out)],
+                           check=True)
+        else:
+            shutil.copy2(src, out)
+
+    _put(device, "ios_arm64", None)          # already a single arm64 slice
+    _put(sim,    "ios_sim_arm64", "arm64")
+    _put(sim,    "ios_sim_x86_64", "x86_64")
+    print(f"[sulphur] staged iOS wgpu at {stage}")
+    return stage
+
+
+def _repackage_ios_xcframework() -> None:
+    """Fold build_thorvg.py's iOS thorvg.xcframework slices into
+    NucleantThorVG's ThorVG.xcframework, renaming thorvg -> ThorVG to match the
+    macOS convention (binary name, install name, CThorVG's link)."""
+    import plistlib
+    import tempfile
+
+    if not THORVG_IOS_XCFW.is_dir():
+        sys.exit(f"[sulphur] expected {THORVG_IOS_XCFW} after the iOS build")
+
+    work = Path(tempfile.mkdtemp(prefix="thorvg_ios_"))
+    ios_frameworks: list[Path] = []
+    for slice_dir in sorted(THORVG_IOS_XCFW.iterdir()):
+        fw = slice_dir / "thorvg.framework"
+        if not fw.is_dir():
+            continue
+        dst = work / slice_dir.name / "ThorVG.framework"
+        dst.mkdir(parents=True)
+        shutil.copy2(fw / "thorvg", dst / "ThorVG")
+        subprocess.run(["install_name_tool", "-id",
+                        "@rpath/ThorVG.framework/ThorVG", str(dst / "ThorVG")], check=True)
+        shutil.copytree(fw / "Headers", dst / "Headers")
+        plist_path = fw / "Info.plist"
+        info = plistlib.loads(plist_path.read_bytes()) if plist_path.exists() else {}
+        info["CFBundleExecutable"] = "ThorVG"
+        info["CFBundleName"] = "ThorVG"
+        (dst / "Info.plist").write_bytes(plistlib.dumps(info))
+        ios_frameworks.append(dst)
+
+    if not ios_frameworks:
+        sys.exit(f"[sulphur] no thorvg.framework slices under {THORVG_IOS_XCFW}")
+
+    # Rebuild ThorVG.xcframework from the existing macOS slice + the new iOS ones.
+    macos_fw = NUCLEANT_XCFW / "macos-arm64_x86_64" / "ThorVG.framework"
+    cmd = ["xcodebuild", "-create-xcframework", "-framework", str(macos_fw)]
+    for fw in ios_frameworks:
+        cmd += ["-framework", str(fw)]
+    new_xcfw = work / "ThorVG.xcframework"
+    cmd += ["-output", str(new_xcfw)]
+    subprocess.run(cmd, check=True)
+
+    if NUCLEANT_XCFW.exists():
+        shutil.rmtree(NUCLEANT_XCFW)
+    shutil.copytree(new_xcfw, NUCLEANT_XCFW, symlinks=True)
+    print(f"[sulphur] ThorVG.xcframework rebuilt with macos + "
+          f"{[f.parent.name for f in ios_frameworks]}")
+
+    # Fold in libomp.xcframework (iOS-only, dynamic OpenMP) so NucleantThorVG's
+    # Package.swift can embed libomp.framework on iOS — the iOS ThorVG.framework
+    # links @rpath/libomp.framework/libomp.
+    if LIBOMP_IOS_XCFW.is_dir():
+        if NUCLEANT_LIBOMP.exists():
+            shutil.rmtree(NUCLEANT_LIBOMP)
+        shutil.copytree(LIBOMP_IOS_XCFW, NUCLEANT_LIBOMP, symlinks=True)
+        print(f"[sulphur] libomp.xcframework copied -> {NUCLEANT_LIBOMP}")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="SulphurCore thorvg build wrapper.",
@@ -131,18 +248,29 @@ def main() -> None:
 
     _ensure_thorvg_cython()
 
+    env = os.environ.copy()
+    if args.platform == "ios":
+        if not WGPU_XCFRAMEWORK.is_dir():
+            sys.exit(f"[sulphur] wgpu XCFramework not found at {WGPU_XCFRAMEWORK} — "
+                     f"run NucleantVulkan/scripts/build_wgpu.py first")
+        # build_thorvg.py stages per-slice wgpu_native.framework bundles from
+        # this xcframework (iOS links -framework, not a bare dylib).
+        env["WGPU_XCFRAMEWORK"] = str(WGPU_XCFRAMEWORK)
+
     cmd = [sys.executable, str(THORVG_BUILD_SCRIPT), args.platform]
     if args.thorvg_version:
         cmd += [f"--version={args.thorvg_version}"]
     cmd += forwarded
 
     print(f"[sulphur] Running: {' '.join(cmd)}")
-    result = subprocess.run(cmd, cwd=str(THORVG_CYTHON_DIR))
+    result = subprocess.run(cmd, cwd=str(THORVG_CYTHON_DIR), env=env)
     if result.returncode != 0:
         sys.exit(result.returncode)
 
     if args.platform == "macos":
         _repackage_macos_xcframework()
+    elif args.platform == "ios":
+        _repackage_ios_xcframework()
 
 
 if __name__ == "__main__":
