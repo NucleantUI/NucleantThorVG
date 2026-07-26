@@ -23,9 +23,21 @@ func thorTargets() -> [Target] {
             name: "ThorVG",
             path: "output/ThorVG.xcframework"
         ),
+        // libomp (dynamic OpenMP) — iOS only. The iOS ThorVG.framework links
+        // @rpath/libomp.framework/libomp, so it must be embedded; SPM does that
+        // when CThorVG depends on this binary target. macOS's ThorVG statically
+        // links libomp, so this xcframework carries iOS slices only and is only
+        // depended on for iOS.
+        .binaryTarget(
+            name: "libomp",
+            path: "output/libomp.xcframework"
+        ),
         .target(
             name: "CThorVG",
-            dependencies: ["ThorVG"],
+            dependencies: [
+                "ThorVG",
+                .byName(name: "libomp", condition: .when(platforms: [.iOS])),
+            ],
             publicHeadersPath: "include",
             cSettings: [
                 .headerSearchPath("include"),
@@ -63,7 +75,8 @@ func getTargets() -> [Target] {
 let package = Package(
     name: "NucleantThorVG",
     platforms: [
-        .iOS(.v15),
+        // iOS 17 to match the graph's Observation-framework floor (macOS 14).
+        .iOS(.v17),
         .macOS(.v14)
     ],
     products: [
