@@ -3,7 +3,8 @@
 //  SwiftyThorVG
 //
 import CThorVG
-import simd
+// import simd — SIMD2/SIMDScalar are Swift-stdlib builtins now; unneeded
+// unless/until this file starts using simd's math ops.
 
 public protocol ThorScene: ThorPaint {
     var base: Tvg_Paint { get set }

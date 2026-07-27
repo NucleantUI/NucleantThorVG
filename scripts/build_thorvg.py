@@ -5,8 +5,9 @@ SulphurCore build wrapper for thorvg.
 Clones thorvg-cython next to SulphurCore if not already present,
 then delegates to its build_thorvg.py script.
 
-After a macOS build this script also repackages the fat dylib into
-SulphurCore/output/ThorVG.xcframework so Xcode picks up the new symbols.
+After a macOS/iOS/linux build this script also repackages the built binary
+into Dependencies/apple/ or Dependencies/linux/ so downstream builds pick up
+the new symbols.
 
 Usage
 -----
@@ -30,6 +31,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import platform
 import shutil
 import subprocess
 import sys
@@ -50,24 +52,29 @@ WGPU_XCFRAMEWORK = DEV_ROOT / "NucleantVulkan" / "Dependencies" / "wgpu_native.x
 
 # iOS thorvg.xcframework build_thorvg.py emits, and where we fold it in.
 THORVG_IOS_XCFW  = THORVG_CYTHON_DIR / "thorvg" / "output" / "thorvg.xcframework"
-NUCLEANT_XCFW    = SULPHUR_ROOT / "output" / "ThorVG.xcframework"
+NUCLEANT_XCFW    = SULPHUR_ROOT / "Dependencies" / "apple" / "ThorVG.xcframework"
 # iOS libomp.xcframework (dynamic OpenMP the iOS thorvg framework links) — copied
 # alongside so NucleantThorVG's Package.swift can embed libomp.framework on iOS.
 LIBOMP_IOS_XCFW  = THORVG_CYTHON_DIR / "thorvg" / "output" / "libomp.xcframework"
-NUCLEANT_LIBOMP  = SULPHUR_ROOT / "output" / "libomp.xcframework"
+NUCLEANT_LIBOMP  = SULPHUR_ROOT / "Dependencies" / "apple" / "libomp.xcframework"
 
 # Where build_thorvg.py drops the macOS fat dylib
 THORVG_ROOT     = THORVG_CYTHON_DIR / "thorvg"
 FAT_DYLIB_SRC   = THORVG_ROOT / "output" / "macos_fat" / "libthorvg-1.dylib"
 
-# Where SulphurCore/Package.swift expects the binary.
+# Where NucleantThorVG/Package.swift expects the binary.
 # macOS frameworks must use the versioned layout (not shallow bundles):
 #   ThorVG.framework/Versions/A/ThorVG   ← actual binary
 #   ThorVG.framework/ThorVG              → Versions/Current/ThorVG (symlink)
-XCFW_FW_DIR     = SULPHUR_ROOT / "output" / "ThorVG.xcframework" / \
-                  "macos-arm64_x86_64" / "ThorVG.framework"
+XCFW_FW_DIR     = NUCLEANT_XCFW / "macos-arm64_x86_64" / "ThorVG.framework"
 XCFW_BINARY     = XCFW_FW_DIR / "Versions" / "A" / "ThorVG"
-LOOSE_DYLIB_DST = SULPHUR_ROOT / "output" / "macos" / "libthorvg-1.dylib"
+LOOSE_DYLIB_DST = SULPHUR_ROOT / "Dependencies" / "apple" / "macos" / "libthorvg-1.dylib"
+
+# Where build_thorvg.py drops the Linux .so (own build output, same as
+# THORVG_ROOT/output/macos_fat/ for macOS above).
+THORVG_LINUX_SO_DIR = THORVG_ROOT / "output" / f"linux_{platform.machine()}"
+# Where NucleantThorVG vendors it — mirrors Dependencies/apple/.
+NUCLEANT_LINUX_DIR  = SULPHUR_ROOT / "Dependencies" / "linux"
 
 XCFW_INSTALL_NAME = "@rpath/ThorVG.framework/ThorVG"
 
@@ -128,6 +135,29 @@ def _repackage_macos_xcframework() -> None:
     shutil.copy2(str(FAT_DYLIB_SRC), str(LOOSE_DYLIB_DST))
     print(f"[sulphur]   loose dylib:        {LOOSE_DYLIB_DST}")
 
+    print("[sulphur] Repackage done.\n")
+
+
+def _repackage_linux() -> None:
+    """Copy the freshly-built .so into Dependencies/linux/lib — vendored
+    into the repo, the same way _repackage_macos_xcframework() vendors the
+    fat dylib into Dependencies/apple/. Package.swift's Linux `CThorVG`
+    target links this directly (unsafeFlags -L/-l + an -rpath back to this
+    same directory), not through pkg-config.
+    """
+    so_files = list(THORVG_LINUX_SO_DIR.glob("libthorvg-1.so*"))
+    if not so_files:
+        print(f"[sulphur] WARNING: no libthorvg-1.so* found in {THORVG_LINUX_SO_DIR} — skipping Dependencies/linux repackage")
+        return
+
+    print(f"\n[sulphur] Repackaging Dependencies/linux ...")
+
+    lib_dir = NUCLEANT_LINUX_DIR / "lib"
+    lib_dir.mkdir(parents=True, exist_ok=True)
+
+    for f in so_files:
+        shutil.copy2(str(f), str(lib_dir / f.name))
+    print(f"[sulphur]   libs: {lib_dir}")
     print("[sulphur] Repackage done.\n")
 
 
@@ -256,6 +286,19 @@ def main() -> None:
         # build_thorvg.py stages per-slice wgpu_native.framework bundles from
         # this xcframework (iOS links -framework, not a bare dylib).
         env["WGPU_XCFRAMEWORK"] = str(WGPU_XCFRAMEWORK)
+    elif args.platform == "linux":
+        if shutil.which("pkg-config") is None or subprocess.run(
+            ["pkg-config", "--exists", "wgpu-native"]
+        ).returncode != 0:
+            sys.exit(
+                "[sulphur] wgpu-native not found via pkg-config — build it first, "
+                "e.g.: python3 ../NucleantVulkan/scripts/build_wgpu.py --prefix ~/.local "
+                "&& export PKG_CONFIG_PATH=~/.local/lib/pkgconfig:$PKG_CONFIG_PATH"
+            )
+        # Default to the `wg` (WebGPU) engine, unless the caller forwarded
+        # their own --gpu.
+        if not any(a.startswith("--gpu") for a in forwarded):
+            forwarded = ["--gpu=vulkan"] + forwarded
 
     cmd = [sys.executable, str(THORVG_BUILD_SCRIPT), args.platform]
     if args.thorvg_version:
@@ -271,6 +314,8 @@ def main() -> None:
         _repackage_macos_xcframework()
     elif args.platform == "ios":
         _repackage_ios_xcframework()
+    elif args.platform == "linux":
+        _repackage_linux()
 
 
 if __name__ == "__main__":

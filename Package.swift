@@ -1,10 +1,21 @@
 // swift-tools-version: 6.2
 // The swift-tools-version declares the minimum version of Swift required to build this package.
 
+import Foundation
 import PackageDescription
 
-let devMode = false
+let devMode = true
 let branch = "master"
+
+func getPlatformTarget() -> PackageDescription.Platform {
+#if os(Linux)
+    return .linux
+#else
+    return .macOS
+#endif
+}
+
+let platformTarget = getPlatformTarget()
 
 func getDepedencies() -> [Package.Dependency] {
     var deps = [Package.Dependency]()
@@ -18,10 +29,37 @@ func getDepedencies() -> [Package.Dependency] {
 }
 
 func thorTargets() -> [Target] {
+    if platformTarget == .linux {
+        // Vendored libthorvg-1.so (built with the `wg`/WebGPU engine) in
+        // Dependencies/linux/lib, linked directly — same role
+        // Dependencies/apple/ThorVG.xcframework plays below, just without
+        // SPM binaryTarget/XCFramework support on Linux. Run
+        // scripts/build_thorvg.py linux first (wraps thorvg-cython) to
+        // (re)produce it. See Dependencies/linux/README.md.
+        let packageRoot = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+        let linuxLibDir = packageRoot.appendingPathComponent("Dependencies/linux/lib").path
+        return [
+            .target(
+                name: "CThorVG",
+                path: "Sources/CThorVG",
+                publicHeadersPath: "include",
+                cSettings: [
+                    .headerSearchPath("include"),
+                ],
+                linkerSettings: [
+                    .linkedLibrary("thorvg-1"),
+                    .unsafeFlags([
+                        "-L\(linuxLibDir)",
+                        "-Xlinker", "-rpath", "-Xlinker", linuxLibDir,
+                    ]),
+                ]
+            ),
+        ]
+    }
     return [
         .binaryTarget(
             name: "ThorVG",
-            path: "output/ThorVG.xcframework"
+            path: "Dependencies/apple/ThorVG.xcframework"
         ),
         // libomp (dynamic OpenMP) — iOS only. The iOS ThorVG.framework links
         // @rpath/libomp.framework/libomp, so it must be embedded; SPM does that
@@ -30,7 +68,7 @@ func thorTargets() -> [Target] {
         // depended on for iOS.
         .binaryTarget(
             name: "libomp",
-            path: "output/libomp.xcframework"
+            path: "Dependencies/apple/libomp.xcframework"
         ),
         .target(
             name: "CThorVG",
