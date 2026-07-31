@@ -360,4 +360,299 @@ private func supportsLinearBgraStorage(_ physicalDevice: VkPhysicalDevice) -> Bo
     vkGetPhysicalDeviceFormatProperties(physicalDevice, VK_FORMAT_B8G8R8A8_UNORM, &props)
     return (props.linearTilingFeatures & VkFormatFeatureFlags(VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT.rawValue)) != 0
 }
+#elseif os(Linux)
+import NucleantVulkan
+import CVulkan
+import CThorVG
+
+extension VulkanRenderEngine {
+
+    /// Linux mirror of the Apple `makeThorWidgetNode(adopting:width:height:)`
+    /// above: a wgpu texture, a `Tvg_Canvas` targeting it, and a
+    /// `ThorShaderNode` importing that texture's memory as a VkImage — zero
+    /// copy, via `VK_KHR_external_memory_fd` instead of `VK_EXT_metal_objects`.
+    /// No storage-capable (canvas post shader) support yet — see the comment
+    /// on `WgpuContext.Target.exportedFd`.
+    public func makeThorWidgetNode(
+        adopting canvasBase: Tvg_Canvas? = nil,
+        width:  Int,
+        height: Int
+    ) -> ThorShaderNode<RenderNode>? {
+        guard let wgpu = WgpuContext.shared else {
+            print("VulkanRenderEngine: no WgpuContext — thor node unbuildable")
+            return nil
+        }
+        guard let target = wgpu.makeTarget(width: width, height: height) else {
+            print("VulkanRenderEngine: wgpu target creation failed")
+            return nil
+        }
+        guard let fd = target.nativeVulkanExportedFd() else {
+            print("VulkanRenderEngine: wgpu target has no exported fd — driver may lack VK_KHR_external_memory_fd")
+            target.release()
+            return nil
+        }
+        guard let canvas = canvasBase ?? tvg_wgcanvas_create(TVG_ENGINE_OPTION_DEFAULT) else {
+            print("VulkanRenderEngine: tvg_wgcanvas_create failed")
+            target.release()
+            return nil
+        }
+
+        guard let node = try? makeThorNode(
+            canvas: canvas,
+            importingFd: fd,
+            width: width,
+            height: height
+        ) else {
+            print("VulkanRenderEngine: makeThorNode(importingFd:) failed")
+            target.release()
+            return nil
+        }
+
+        let result = tvg_wgcanvas_set_target(
+            canvas,
+            wgpu.devicePointer,
+            wgpu.instancePointer,
+            target.texturePointer,
+            UInt32(width),
+            UInt32(height),
+            TVG_COLORSPACE_ABGR8888S,
+            1
+        )
+        guard result == TVG_RESULT_SUCCESS else {
+            print("VulkanRenderEngine: tvg_wgcanvas_set_target failed (\(result))")
+            target.release()
+            return nil
+        }
+
+        node.waitForExternalCompletion = { wgpu.waitForGPUCompletion() }
+        node.releaseExternal = { target.release() }
+        return node
+    }
+
+    /// Just the imported VkImage + view + memory from a POSIX fd exported via
+    /// `VK_KHR_external_memory_fd` — the Linux mirror of
+    /// `makeImportedImage(mtlTexture:)`. Unlike the Metal struct,
+    /// `VkImportMemoryFdInfoKHR`/`VkExternalMemoryImageCreateInfo` are plain
+    /// value types with no ObjC fields, so they import into Swift cleanly —
+    /// no manual byte-layout needed, just heap-stable storage for the pNext
+    /// chain across the call (`defer`-deallocated after `vkAllocateMemory`
+    /// returns, same as everywhere else in this file).
+    ///
+    /// `fd` is consumed on a *successful* import (Vulkan spec: ownership
+    /// transfers to the driver); on failure the caller still owns it.
+    func makeImportedImage(
+        fd:     Int32,
+        width:  Int,
+        height: Int
+    ) throws -> (image: VkImage, view: VkImageView, memory: VkDeviceMemory?) {
+        // Must match the exporting image's creation parameters (Vulkan spec
+        // requirement for VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT): same
+        // format/extent/mip/array/sample counts and tiling as wgpu-hal's own
+        // texture creation, which always uses OPTIMAL tiling.
+        var externalMemoryInfo = VkExternalMemoryImageCreateInfo()
+        externalMemoryInfo.sType = VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO
+        externalMemoryInfo.handleTypes = VkExternalMemoryHandleTypeFlags(
+            VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT.rawValue
+        )
+
+        var image: VkImage?
+        let imageResult: VkResult = withUnsafePointer(to: &externalMemoryInfo) { extPtr in
+            var imageInfo = VkImageCreateInfo()
+            imageInfo.sType         = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO
+            imageInfo.pNext         = UnsafeRawPointer(extPtr)
+            imageInfo.imageType     = VK_IMAGE_TYPE_2D
+            imageInfo.format        = VK_FORMAT_B8G8R8A8_UNORM
+            imageInfo.extent        = VkExtent3D(width: UInt32(width), height: UInt32(height), depth: 1)
+            imageInfo.mipLevels     = 1
+            imageInfo.arrayLayers   = 1
+            imageInfo.samples       = VK_SAMPLE_COUNT_1_BIT
+            imageInfo.tiling        = VK_IMAGE_TILING_OPTIMAL
+            imageInfo.usage         = VkImageUsageFlags(
+                VK_IMAGE_USAGE_SAMPLED_BIT.rawValue |
+                VK_IMAGE_USAGE_TRANSFER_SRC_BIT.rawValue |
+                VK_IMAGE_USAGE_TRANSFER_DST_BIT.rawValue
+            )
+            imageInfo.sharingMode   = VK_SHARING_MODE_EXCLUSIVE
+            imageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED
+            return vkCreateImage(device, &imageInfo, nil, &image)
+        }
+        guard imageResult == VK_SUCCESS, let image else {
+            throw VulkanEngineError.image
+        }
+
+        var requirements = VkMemoryRequirements()
+        vkGetImageMemoryRequirements(device, image, &requirements)
+
+        let dedicatedInfo = UnsafeMutablePointer<VkMemoryDedicatedAllocateInfo>.allocate(capacity: 1)
+        defer { dedicatedInfo.deallocate() }
+        dedicatedInfo.pointee = VkMemoryDedicatedAllocateInfo()
+        dedicatedInfo.pointee.sType = VK_STRUCTURE_TYPE_MEMORY_DEDICATED_ALLOCATE_INFO
+        dedicatedInfo.pointee.image = image
+
+        let importInfo = UnsafeMutablePointer<VkImportMemoryFdInfoKHR>.allocate(capacity: 1)
+        defer { importInfo.deallocate() }
+        importInfo.pointee = VkImportMemoryFdInfoKHR()
+        importInfo.pointee.sType = VK_STRUCTURE_TYPE_IMPORT_MEMORY_FD_INFO_KHR
+        importInfo.pointee.pNext = UnsafeRawPointer(dedicatedInfo)
+        importInfo.pointee.handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT
+        importInfo.pointee.fd = fd
+
+        var memory: VkDeviceMemory?
+        var allocInfo = VkMemoryAllocateInfo()
+        allocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO
+        allocInfo.pNext = UnsafeRawPointer(importInfo)
+        allocInfo.allocationSize = requirements.size
+        allocInfo.memoryTypeIndex = findMemoryType(
+            typeFilter: requirements.memoryTypeBits,
+            properties: VkMemoryPropertyFlags(VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT.rawValue)
+        )
+        guard vkAllocateMemory(device, &allocInfo, nil, &memory) == VK_SUCCESS, let memory else {
+            vkDestroyImage(device, image, nil)
+            throw VulkanEngineError.memory
+        }
+        vkBindImageMemory(device, image, memory, 0)
+
+        var view: VkImageView?
+        var viewInfo = VkImageViewCreateInfo()
+        viewInfo.sType    = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO
+        viewInfo.image    = image
+        viewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D
+        viewInfo.format   = VK_FORMAT_B8G8R8A8_UNORM
+        viewInfo.subresourceRange = VkImageSubresourceRange(
+            aspectMask:     VkImageAspectFlags(VK_IMAGE_ASPECT_COLOR_BIT.rawValue),
+            baseMipLevel:   0, levelCount: 1,
+            baseArrayLayer: 0, layerCount: 1
+        )
+        guard vkCreateImageView(device, &viewInfo, nil, &view) == VK_SUCCESS, let view else {
+            vkFreeMemory(device, memory, nil)
+            vkDestroyImage(device, image, nil)
+            throw VulkanEngineError.image
+        }
+
+        // Same reasoning as the Metal path: transition to GENERAL, never
+        // UNDEFINED, so the driver isn't told it may discard content already
+        // (or about to be) written by wgpu's blit.
+        oneTimeSubmit { cmd in
+            engineImageBarrier(
+                cmd,
+                image:     image,
+                srcLayout: VK_IMAGE_LAYOUT_UNDEFINED,
+                srcAccess: 0,
+                srcStage:  VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                dstLayout: VK_IMAGE_LAYOUT_GENERAL,
+                dstAccess: VkAccessFlags(VK_ACCESS_MEMORY_WRITE_BIT.rawValue) | VkAccessFlags(VK_ACCESS_MEMORY_READ_BIT.rawValue),
+                dstStage:  VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT
+            )
+        }
+
+        return (image, view, memory)
+    }
+
+    /// Create a `ThorShaderNode` whose VkImage is *imported* from a POSIX fd
+    /// (via `VK_KHR_external_memory_fd`) rather than allocated — the Linux
+    /// mirror of `makeThorNode(importingMetalTexture:)`.
+    func makeThorNode(
+        canvas:       Tvg_Canvas,
+        importingFd fd: Int32,
+        width:        Int,
+        height:       Int
+    ) throws -> ThorShaderNode<RenderNode> {
+        let created = try makeImportedImage(fd: fd, width: width, height: height)
+        return ThorShaderNode(
+            canvas:             ThorVulkanCanvas(base: canvas),
+            width:              UInt32(width),
+            height:             UInt32(height),
+            image:              created.image,
+            imageView:          created.view,
+            memory:             created.memory,
+            isExternallyBacked: true,
+            storageCapable:     false
+        )
+    }
+
+    /// Linux mirror of `resizeThorNode` above: mint a new wgpu target +
+    /// imported VkImage at the new size via the fd-import path instead of
+    /// Metal, and swap it into the same `ThorShaderNode`. See the Apple
+    /// version for the full rationale (identity, cache invalidation, etc.) —
+    /// this only differs in how the new backing is created and imported.
+    @discardableResult
+    public func resizeThorNode(
+        _ node: ThorShaderNode<RenderNode>,
+        id:     Int,
+        width:  Int,
+        height: Int
+    ) -> Bool {
+        guard width > 0, height > 0,
+              node.width != UInt32(width) || node.height != UInt32(height)
+        else { return true }
+
+        guard let wgpu = WgpuContext.shared else {
+            print("VulkanRenderEngine: no WgpuContext — thor node unresizable")
+            return false
+        }
+        guard let target = wgpu.makeTarget(width: width, height: height) else {
+            print("VulkanRenderEngine: wgpu target creation failed (resize)")
+            return false
+        }
+        guard let fd = target.nativeVulkanExportedFd() else {
+            print("VulkanRenderEngine: wgpu target has no exported fd (resize)")
+            target.release()
+            return false
+        }
+
+        let created: (image: VkImage, view: VkImageView, memory: VkDeviceMemory?)
+        do {
+            created = try makeImportedImage(fd: fd, width: width, height: height)
+        } catch {
+            print("VulkanRenderEngine: imported image (resize) failed: \(error)")
+            target.release()
+            return false
+        }
+
+        let result = tvg_wgcanvas_set_target(
+            node.canvas.base,
+            wgpu.devicePointer,
+            wgpu.instancePointer,
+            target.texturePointer,
+            UInt32(width),
+            UInt32(height),
+            TVG_COLORSPACE_ABGR8888S,
+            1
+        )
+        guard result == TVG_RESULT_SUCCESS else {
+            print("VulkanRenderEngine: tvg_wgcanvas_set_target failed on resize (\(result))")
+            vkDeviceWaitIdle(device)
+            vkDestroyImageView(device, created.view, nil)
+            vkDestroyImage(device, created.image, nil)
+            if let m = created.memory { vkFreeMemory(device, m, nil) }
+            target.release()
+            return false
+        }
+
+        let oldImage   = node.image
+        let oldView    = node.imageView
+        let oldMemory  = node.memory
+        let oldRelease = node.releaseExternal
+
+        vkDeviceWaitIdle(device)
+
+        node.image                     = created.image
+        node.imageView                 = created.view
+        node.memory                    = created.memory
+        node.width                     = UInt32(width)
+        node.height                    = UInt32(height)
+        node.currentLayout             = VK_IMAGE_LAYOUT_GENERAL
+        node.waitForExternalCompletion = { wgpu.waitForGPUCompletion() }
+        node.releaseExternal           = { target.release() }
+        node.dirty                     = true
+
+        vkDestroyImageView(device, oldView, nil)
+        vkDestroyImage(device, oldImage, nil)
+        if let oldMemory { vkFreeMemory(device, oldMemory, nil) }
+        oldRelease?()
+
+        invalidateComposite(id: id)
+        return true
+    }
+}
 #endif
