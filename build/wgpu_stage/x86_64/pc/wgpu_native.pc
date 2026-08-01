@@ -1,0 +1,5 @@
+Name: wgpu_native
+Description: wgpu-native (WebGPU) for the ThorVG wg engine
+Version: 29.0.1.1
+Cflags: -isystem/home/lexmint/nucleant_dev/NucleantThorVG/build/wgpu_stage/x86_64/include
+Libs: -Wl,-L/home/lexmint/nucleant_dev/NucleantVulkan/Dependencies/android/x86_64/lib -lwgpu_native

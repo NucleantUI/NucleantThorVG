@@ -360,7 +360,10 @@ private func supportsLinearBgraStorage(_ physicalDevice: VkPhysicalDevice) -> Bo
     vkGetPhysicalDeviceFormatProperties(physicalDevice, VK_FORMAT_B8G8R8A8_UNORM, &props)
     return (props.linearTilingFeatures & VkFormatFeatureFlags(VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT.rawValue)) != 0
 }
-#elseif os(Linux)
+// Android shares the Linux path: both import the wgpu texture through
+// VK_KHR_external_memory_fd rather than VK_EXT_metal_objects, and nothing
+// below is Linux-specific — no Glibc, no Wayland/X11.
+#elseif os(Linux) || os(Android)
 import NucleantVulkan
 import CVulkan
 import CThorVG

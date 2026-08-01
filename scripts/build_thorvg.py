@@ -76,6 +76,28 @@ THORVG_LINUX_SO_DIR = THORVG_ROOT / "output" / f"linux_{platform.machine()}"
 # Where NucleantThorVG vendors it — mirrors Dependencies/apple/.
 NUCLEANT_LINUX_DIR  = SULPHUR_ROOT / "Dependencies" / "linux"
 
+# Android: build_thorvg.py emits one directory per architecture, named after
+# the Meson cross file rather than the ABI. Package.swift and Gradle both work
+# in ABI names, so this table is the join — same role the ABI mapping plays in
+# NucleantVulkan/scripts/build_wgpu.py.
+ANDROID_OUTPUT_ABIS = {
+    "android_aarch64": "arm64-v8a",
+    "android_x86_64":  "x86_64",
+}
+NUCLEANT_ANDROID_DIR = SULPHUR_ROOT / "Dependencies" / "android"
+
+# thorvg-cython's build_android() builds aarch64 then x86_64 inside a single
+# process, and pkg-config is configured once per process — so the staged .pc
+# can only describe one ABI per run. aarch64 is built first, so that is the one
+# a run reliably yields.
+ANDROID_PRIMARY_ABI = "arm64-v8a"
+ANDROID_PRIMARY_ARCH = "android_aarch64"
+
+# wgpu-native for Android, vendored per ABI by
+# NucleantVulkan/scripts/build_wgpu.py --android. ThorVG's `wg` engine links
+# the same .so this engine does, so both land on one loaded instance.
+WGPU_ANDROID_DIR = DEV_ROOT / "NucleantVulkan" / "Dependencies" / "android"
+
 XCFW_INSTALL_NAME = "@rpath/ThorVG.framework/ThorVG"
 
 
@@ -159,6 +181,136 @@ def _repackage_linux() -> None:
         shutil.copy2(str(f), str(lib_dir / f.name))
     print(f"[sulphur]   libs: {lib_dir}")
     print("[sulphur] Repackage done.\n")
+
+
+def _stage_wgpu_android(abi: str) -> str:
+    """Stage wgpu-native for one ABI into what thorvg's `wg` engine expects.
+
+    The Android counterpart of _stage_wgpu_ios(): thorvg-cython knows nothing
+    about this package, so everything it needs is handed over by environment —
+    here a pkg-config directory it can be pointed at with PKG_CONFIG_LIBDIR.
+
+    Three details, all forced by thorvg/meson rather than chosen:
+
+      * the module is `wgpu_native` (underscore) while build_wgpu.py installs
+        `wgpu-native.pc` (hyphen), so the name is aliased here — same aliasing
+        _linux_wgpu_pkgconfig_dir() does inside thorvg-cython for Linux.
+      * the wg engine does `#include <webgpu/webgpu.h>` while wgpu-native ships
+        its headers flat, so a `webgpu/` directory of symlinks is staged.
+      * Cflags uses -isystem and Libs uses -Wl,-L rather than -I/-L. pkg-config
+        prefixes PKG_CONFIG_SYSROOT_DIR onto -I and -L only, and meson sets
+        that from the Android cross file's sys_root — which would rewrite these
+        absolute paths to <ndk-sysroot>/home/... and make them vanish. The
+        other two spellings pass through untouched.
+    """
+    stage = SULPHUR_ROOT / "build" / "wgpu_stage" / abi
+    inc = stage / "include" / "webgpu"
+    pc_dir = stage / "pc"
+    inc.mkdir(parents=True, exist_ok=True)
+    pc_dir.mkdir(parents=True, exist_ok=True)
+
+    src_inc = WGPU_ANDROID_DIR / "include"
+    lib_dir = WGPU_ANDROID_DIR / abi / "lib"
+    for header in ("webgpu.h", "wgpu.h"):
+        src = src_inc / header
+        if not src.is_file():
+            sys.exit(f"[sulphur] wgpu-native header not found: {src}")
+        dst = inc / header
+        if dst.is_symlink() or dst.exists():
+            dst.unlink()
+        dst.symlink_to(src)
+
+    (pc_dir / "wgpu_native.pc").write_text(
+        "Name: wgpu_native\n"
+        "Description: wgpu-native (WebGPU) for the ThorVG wg engine\n"
+        "Version: 29.0.1.1\n"
+        f"Cflags: -isystem{stage / 'include'}\n"
+        f"Libs: -Wl,-L{lib_dir} -lwgpu_native\n"
+    )
+    return str(pc_dir)
+
+
+def _build_android_abi(abi: str, arch_name: str, gpu: str) -> None:
+    """Build one Android ABI against its own staged wgpu.
+
+    thorvg-cython builds every ABI inside a single process, and pkg-config is
+    configured once per process — so one run can only ever describe one ABI's
+    wgpu. Rather than ask thorvg-cython to change (it knows nothing about this
+    package and must stay that way), the remaining ABIs are driven here, from
+    the cross files it already generated, with that ABI's staged .pc.
+
+    meson args come from thorvg-cython's own _meson_common() so the two paths
+    cannot drift.
+    """
+    build_root = THORVG_ROOT / "build_android"
+    cross_file = build_root / "cross" / f"{arch_name}.txt"
+    if not cross_file.is_file():
+        sys.exit(f"[sulphur] cross file missing: {cross_file}")
+
+    build_dir = build_root / arch_name
+    if build_dir.exists():
+        # A fresh configure is required, not --reconfigure: meson caches the
+        # pkg-config result and would reuse the previous ABI's wgpu.
+        shutil.rmtree(build_dir)
+
+    pc_dir = _stage_wgpu_android(abi)
+    env = {
+        **os.environ,
+        "PKG_CONFIG": shutil.which("pkg-config") or "pkg-config",
+        "PKG_CONFIG_LIBDIR": pc_dir,
+        "PKG_CONFIG_PATH": pc_dir,
+    }
+
+    print(f"\n[sulphur] Building {arch_name} ({abi}) against staged wgpu ...")
+    subprocess.run(
+        ["meson", "setup", str(build_dir), "--cross-file", str(cross_file)]
+        + _thorvg_meson_args(gpu),
+        cwd=str(THORVG_ROOT), env=env, check=True,
+    )
+    subprocess.run(["ninja", "-C", str(build_dir)],
+                   cwd=str(THORVG_ROOT), env=env, check=True)
+
+    out_dir = THORVG_ROOT / "output" / arch_name
+    out_dir.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(str(build_dir / "src" / "libthorvg-1.so"),
+                 str(out_dir / "libthorvg-1.so"))
+    print(f"[sulphur]   {arch_name}: {out_dir / 'libthorvg-1.so'}")
+
+
+def _thorvg_meson_args(gpu: str) -> list[str]:
+    """Reuse thorvg-cython's own meson arguments rather than restating them."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        "_tvg_build", str(THORVG_BUILD_SCRIPT))
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod._meson_common("android", gpu)
+
+
+def _repackage_android() -> None:
+    """Copy the freshly-built .so files into Dependencies/android/<abi>/lib.
+
+    Same job as _repackage_linux(), but per-ABI: Android builds one
+    architecture at a time and Package.swift's `.android` branch resolves
+    Dependencies/android/<abi>/lib for whichever ABI is being built. No rpath
+    is involved (unlike Linux) — on device the loader resolves DT_NEEDED out of
+    the app's native library directory, where Gradle stages this .so.
+    """
+    for out_name, abi in ANDROID_OUTPUT_ABIS.items():
+        src_dir = THORVG_ROOT / "output" / out_name
+        so_files = list(src_dir.glob("libthorvg-1.so*"))
+        if not so_files:
+            print(f"[sulphur] WARNING: no libthorvg-1.so* found in {src_dir} "
+                  f"— skipping {abi}")
+            continue
+
+        lib_dir = NUCLEANT_ANDROID_DIR / abi / "lib"
+        lib_dir.mkdir(parents=True, exist_ok=True)
+        for f in so_files:
+            shutil.copy2(str(f), str(lib_dir / f.name))
+        print(f"[sulphur]   {abi}: {lib_dir}")
+
+    print("[sulphur] Android repackage done.\n")
 
 
 def _stage_wgpu_ios() -> Path:
@@ -286,6 +438,32 @@ def main() -> None:
         # build_thorvg.py stages per-slice wgpu_native.framework bundles from
         # this xcframework (iOS links -framework, not a bare dylib).
         env["WGPU_XCFRAMEWORK"] = str(WGPU_XCFRAMEWORK)
+    elif args.platform == "android":
+        # The `wg` engine links wgpu-native, so it has to exist before thorvg
+        # is configured — failing here beats a link error deep in Meson.
+        missing = [
+            abi for abi in ANDROID_OUTPUT_ABIS.values()
+            if not (WGPU_ANDROID_DIR / abi / "lib" / "libwgpu_native.so").is_file()
+        ]
+        if missing:
+            sys.exit(
+                f"[sulphur] wgpu-native missing for Android ABI(s) {missing} — "
+                "build it first: python3 ../NucleantVulkan/scripts/build_wgpu.py "
+                "--android"
+            )
+        # thorvg-cython builds every ABI in one invocation, so one
+        # PKG_CONFIG_LIBDIR has to serve them all — see the note in main()
+        # below about which ABIs that actually yields.
+        pc_dir = _stage_wgpu_android(ANDROID_PRIMARY_ABI)
+        env["PKG_CONFIG"] = shutil.which("pkg-config") or "pkg-config"
+        # LIBDIR *replaces* the default search path, so the build machine's
+        # .pc files (libpng etc — x86_64 Linux objects that cannot link into an
+        # Android .so) stay invisible and thorvg falls back to its bundled
+        # decoders.
+        env["PKG_CONFIG_LIBDIR"] = pc_dir
+        env["PKG_CONFIG_PATH"] = pc_dir
+        if not any(a.startswith("--gpu") for a in forwarded):
+            forwarded = ["--gpu=vulkan"] + forwarded
     elif args.platform == "linux":
         if shutil.which("pkg-config") is None or subprocess.run(
             ["pkg-config", "--exists", "wgpu-native"]
@@ -308,7 +486,30 @@ def main() -> None:
     print(f"[sulphur] Running: {' '.join(cmd)}")
     result = subprocess.run(cmd, cwd=str(THORVG_CYTHON_DIR), env=env)
     if result.returncode != 0:
-        sys.exit(result.returncode)
+        if args.platform != "android":
+            sys.exit(result.returncode)
+        # Expected on Android with the wg engine: the run is staged for the
+        # first ABI, so the later ones fail at link against the wrong
+        # architecture. Tolerated only when the first ABI actually produced its
+        # library — otherwise this is a real failure.
+        primary = (THORVG_ROOT / "build_android" / ANDROID_PRIMARY_ARCH
+                   / "src" / "libthorvg-1.so")
+        if not primary.is_file():
+            sys.exit(result.returncode)
+        print(f"[sulphur] {ANDROID_PRIMARY_ARCH} built; rebuilding the "
+              f"remaining ABIs with their own wgpu ...")
+
+    if args.platform == "android":
+        gpu = "vulkan" if any(a == "--gpu=vulkan" for a in forwarded) else ""
+        out_root = THORVG_ROOT / "output"
+        for arch_name, abi in ANDROID_OUTPUT_ABIS.items():
+            built = THORVG_ROOT / "build_android" / arch_name / "src" / "libthorvg-1.so"
+            if built.is_file():
+                dst = out_root / arch_name
+                dst.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(str(built), str(dst / "libthorvg-1.so"))
+                continue
+            _build_android_abi(abi, arch_name, gpu)
 
     if args.platform == "macos":
         _repackage_macos_xcframework()
@@ -316,6 +517,8 @@ def main() -> None:
         _repackage_ios_xcframework()
     elif args.platform == "linux":
         _repackage_linux()
+    elif args.platform == "android":
+        _repackage_android()
 
 
 if __name__ == "__main__":

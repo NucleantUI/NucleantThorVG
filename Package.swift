@@ -8,6 +8,16 @@ let devMode = true
 let branch = "master"
 
 func getPlatformTarget() -> PackageDescription.Platform {
+    // Package.swift is compiled by the *host* toolchain even when
+    // cross-compiling, so `#if os(...)` only ever describes the host. Building
+    // for Android from this Linux box would otherwise resolve to `.linux` and
+    // link the Linux libthorvg. Android is always a cross-compile, so it is an
+    // explicit env-var opt-in — SWIFT_ANDROID_HOME, matching NucleantVulkan,
+    // CPython, PySwiftKit and PyNucleantUI.
+    let env = ProcessInfo.processInfo.environment
+    if env["SWIFT_ANDROID_HOME"] != nil || env["ANDROID_BUILD"] != nil {
+        return .android
+    }
 #if os(Linux)
     return .linux
 #else
@@ -16,6 +26,22 @@ func getPlatformTarget() -> PackageDescription.Platform {
 }
 
 let platformTarget = getPlatformTarget()
+
+/// Vendored Android artifacts for the ABI currently being built. Android
+/// builds one architecture per `swift build`, so unlike Linux there is no
+/// single lib directory. Mirrors NucleantVulkan's helper of the same name.
+func androidABI() -> String {
+    let env = ProcessInfo.processInfo.environment
+    if let abi = env["SWIFT_ANDROID_ABI"], !abi.isEmpty {
+        return abi
+    }
+    switch (env["SWIFT_TRIPLE"] ?? "").split(separator: "-").first.map(String.init) ?? "" {
+    case "aarch64": return "arm64-v8a"
+    case "x86_64":  return "x86_64"
+    case "armv7":   return "armeabi-v7a"
+    default:        return "arm64-v8a"
+    }
+}
 
 func getDepedencies() -> [Package.Dependency] {
     var deps = [Package.Dependency]()
@@ -29,6 +55,30 @@ func getDepedencies() -> [Package.Dependency] {
 }
 
 func thorTargets() -> [Target] {
+    if platformTarget == .android {
+        // Vendored libthorvg-1.so per ABI under Dependencies/android/<abi>/lib
+        // — the same role Dependencies/linux/lib plays below. No -rpath: on
+        // Android the loader resolves DT_NEEDED out of the app's native
+        // library directory, where Gradle stages this .so, and a host path
+        // baked in at build time would not exist on device.
+        let packageRoot = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+        let androidLibDir = packageRoot
+            .appendingPathComponent("Dependencies/android/\(androidABI())/lib").path
+        return [
+            .target(
+                name: "CThorVG",
+                path: "Sources/CThorVG",
+                publicHeadersPath: "include",
+                cSettings: [
+                    .headerSearchPath("include"),
+                ],
+                linkerSettings: [
+                    .linkedLibrary("thorvg-1"),
+                    .unsafeFlags(["-L\(androidLibDir)"]),
+                ]
+            ),
+        ]
+    }
     if platformTarget == .linux {
         // Vendored libthorvg-1.so (built with the `wg`/WebGPU engine) in
         // Dependencies/linux/lib, linked directly — same role
