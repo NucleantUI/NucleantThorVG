@@ -27,6 +27,12 @@ func getPlatformTarget() -> PackageDescription.Platform {
 
 let platformTarget = getPlatformTarget()
 
+// Set by pyswiftkit-builder for a wheel build — the signal that separates the
+// two macOS modes (`uv run` against a wheel vs. the Xcode app embedding this
+// package), which want the ThorVG binary in different shapes. Same use as in
+// NucleantVulkan's Package.swift; see the binary targets below.
+let PIP_MODE = ProcessInfo.processInfo.environment["PIP_MODE"] == "1"
+
 /// Vendored Android artifacts for the ABI currently being built. Android
 /// builds one architecture per `swift build`, so unlike Linux there is no
 /// single lib directory. Mirrors NucleantVulkan's helper of the same name.
@@ -106,7 +112,7 @@ func thorTargets() -> [Target] {
             ),
         ]
     }
-    return [
+    var targets: [Target] = [
         .binaryTarget(
             name: "ThorVG",
             path: "Dependencies/apple/ThorVG.xcframework"
@@ -120,9 +126,28 @@ func thorTargets() -> [Target] {
             name: "libomp",
             path: "Dependencies/apple/libomp.xcframework"
         ),
+    ]
+    // The same Mach-O as ThorVG.xcframework's macOS slice, minus the bundle:
+    // @rpath/libthorvg-1.dylib instead of @rpath/ThorVG.framework/ThorVG. A
+    // wheel vendors plain files into nucleant/.dylibs, so PIP_MODE links this
+    // one on macOS; the Xcode/embed path keeps the framework, and iOS links a
+    // framework either way. scripts/build_thorvg.py emits both from one build.
+    if PIP_MODE {
+        targets.append(
+            .binaryTarget(
+                name: "ThorVGLib",
+                path: "Dependencies/apple/ThorVG_lib.xcframework"
+            )
+        )
+    }
+    targets.append(
         .target(
             name: "CThorVG",
-            dependencies: [
+            dependencies: PIP_MODE ? [
+                .byName(name: "ThorVGLib", condition: .when(platforms: [.macOS])),
+                .byName(name: "ThorVG", condition: .when(platforms: [.iOS, .tvOS, .macCatalyst])),
+                .byName(name: "libomp", condition: .when(platforms: [.iOS])),
+            ] : [
                 "ThorVG",
                 .byName(name: "libomp", condition: .when(platforms: [.iOS])),
             ],
@@ -133,8 +158,9 @@ func thorTargets() -> [Target] {
             linkerSettings: [
                 .linkedFramework("QuartzCore", .when(platforms: [.iOS, .macOS, .tvOS])),
             ]
-        ),
-    ]
+        )
+    )
+    return targets
 }
 
 func mainTargets() -> [Target] {

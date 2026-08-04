@@ -125,7 +125,7 @@ extension VulkanRenderEngine {
             imageInfo.sType         = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO
             imageInfo.pNext         = UnsafeRawPointer(extPtr)
             imageInfo.imageType     = VK_IMAGE_TYPE_2D
-            imageInfo.format        = VK_FORMAT_B8G8R8A8_UNORM
+            imageInfo.format        = importedTextureFormat
             imageInfo.extent        = VkExtent3D(width: UInt32(width), height: UInt32(height), depth: 1)
             imageInfo.mipLevels     = 1
             imageInfo.arrayLayers   = 1
@@ -174,16 +174,7 @@ extension VulkanRenderEngine {
         viewInfo.sType    = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO
         viewInfo.image    = image
         viewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D
-        viewInfo.format   = VK_FORMAT_R8G8B8A8_UNORM
-        // No swizzle: ThorVG adopts the target's format (tvgWg_target_format
-        // .patch), so with an RGBA8Unorm target it writes true RGBA and this
-        // view reads it straight.
-        //
-        // Note for anyone chasing colour on the emulator: its Vulkan is
-        // SwiftShader, which ignores VkComponentMapping here — a swizzle
-        // forcing every channel to red left the picture untouched. So channel
-        // order cannot be corrected at the view on that device, and an
-        // inversion seen only there is the driver, not this code.
+        viewInfo.format   = compositeSampleFormat
         viewInfo.subresourceRange = VkImageSubresourceRange(
             aspectMask:     VkImageAspectFlags(VK_IMAGE_ASPECT_COLOR_BIT.rawValue),
             baseMipLevel:   0, levelCount: 1,
@@ -509,7 +500,7 @@ extension VulkanRenderEngine {
             imageInfo.sType         = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO
             imageInfo.pNext         = UnsafeRawPointer(extPtr)
             imageInfo.imageType     = VK_IMAGE_TYPE_2D
-            imageInfo.format        = VK_FORMAT_R8G8B8A8_UNORM
+            imageInfo.format        = importedTextureFormat
             imageInfo.extent        = VkExtent3D(width: UInt32(width), height: UInt32(height), depth: 1)
             imageInfo.mipLevels     = 1
             imageInfo.arrayLayers   = 1
@@ -562,7 +553,7 @@ extension VulkanRenderEngine {
         viewInfo.sType    = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO
         viewInfo.image    = image
         viewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D
-        viewInfo.format   = VK_FORMAT_B8G8R8A8_UNORM
+        viewInfo.format   = compositeSampleFormat
         viewInfo.subresourceRange = VkImageSubresourceRange(
             aspectMask:     VkImageAspectFlags(VK_IMAGE_ASPECT_COLOR_BIT.rawValue),
             baseMipLevel:   0, levelCount: 1,
@@ -609,7 +600,7 @@ extension VulkanRenderEngine {
             imageInfo.sType         = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO
             imageInfo.pNext         = UnsafeRawPointer(extPtr)
             imageInfo.imageType     = VK_IMAGE_TYPE_2D
-            imageInfo.format        = VK_FORMAT_B8G8R8A8_UNORM
+            imageInfo.format        = importedTextureFormat
             imageInfo.extent        = VkExtent3D(width: UInt32(width), height: UInt32(height), depth: 1)
             imageInfo.mipLevels     = 1
             imageInfo.arrayLayers   = 1
@@ -665,7 +656,7 @@ extension VulkanRenderEngine {
         viewInfo.sType    = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO
         viewInfo.image    = image
         viewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D
-        viewInfo.format   = VK_FORMAT_B8G8R8A8_UNORM
+        viewInfo.format   = compositeSampleFormat
         viewInfo.subresourceRange = VkImageSubresourceRange(
             aspectMask:     VkImageAspectFlags(VK_IMAGE_ASPECT_COLOR_BIT.rawValue),
             baseMipLevel:   0, levelCount: 1,

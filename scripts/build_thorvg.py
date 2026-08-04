@@ -100,6 +100,14 @@ WGPU_ANDROID_DIR = DEV_ROOT / "NucleantVulkan" / "Dependencies" / "android"
 
 XCFW_INSTALL_NAME = "@rpath/ThorVG.framework/ThorVG"
 
+# The bare-dylib form of the same binary, for PIP_MODE. A wheel vendors plain
+# files into nucleant/.dylibs; a framework bundle is what Xcode embed mode
+# wants. NucleantVulkan already splits wgpu the same way (wgpu_native.xcframework
+# vs wgpu_native_framework.xcframework) — this is that split for ThorVG.
+NUCLEANT_LIB_XCFW = SULPHUR_ROOT / "Dependencies" / "apple" / "ThorVG_lib.xcframework"
+LIB_XCFW_DYLIB    = "libthorvg-1.dylib"
+LIB_INSTALL_NAME  = f"@rpath/{LIB_XCFW_DYLIB}"
+
 
 def _ensure_thorvg_cython() -> None:
     if THORVG_CYTHON_DIR.is_dir():
@@ -157,6 +165,56 @@ def _repackage_macos_xcframework() -> None:
     shutil.copy2(str(FAT_DYLIB_SRC), str(LOOSE_DYLIB_DST))
     print(f"[sulphur]   loose dylib:        {LOOSE_DYLIB_DST}")
 
+    print("[sulphur] Repackage done.\n")
+
+
+def _repackage_macos_lib_xcframework() -> None:
+    """Wrap the macOS binary as ThorVG_lib.xcframework — a bare dylib, no bundle.
+
+    The Mach-O is the one _repackage_macos_xcframework() just installed, so the
+    two forms never drift; only LC_ID_DYLIB differs. `install_name_tool`
+    invalidates the code signature and an arm64 slice will not load unsigned,
+    hence the ad-hoc re-sign.
+    """
+    if not XCFW_BINARY.is_file():
+        print(f"[sulphur] WARNING: {XCFW_BINARY} missing — skipping lib xcframework")
+        return
+
+    print(f"\n[sulphur] Repackaging ThorVG_lib.xcframework ...")
+    if NUCLEANT_LIB_XCFW.exists():
+        shutil.rmtree(NUCLEANT_LIB_XCFW)
+
+    slice_id = "macos-arm64_x86_64"
+    dylib = NUCLEANT_LIB_XCFW / slice_id / LIB_XCFW_DYLIB
+    dylib.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(str(XCFW_BINARY), str(dylib))
+    subprocess.run(["install_name_tool", "-id", LIB_INSTALL_NAME, str(dylib)], check=True)
+    subprocess.run(["codesign", "--force", "--sign", "-", str(dylib)], check=True)
+
+    arches = subprocess.check_output(["lipo", "-archs", str(dylib)], text=True).split()
+    archs_xml = "".join(f"\n\t\t\t\t<string>{a}</string>" for a in arches)
+    (NUCLEANT_LIB_XCFW / "Info.plist").write_text(
+        '<?xml version="1.0" encoding="UTF-8"?>\n'
+        '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" '
+        '"http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n'
+        '<plist version="1.0">\n'
+        "<dict>\n"
+        "\t<key>AvailableLibraries</key>\n"
+        "\t<array>\n"
+        "\t\t<dict>\n"
+        f"\t\t\t<key>BinaryPath</key>\n\t\t\t<string>{LIB_XCFW_DYLIB}</string>\n"
+        f"\t\t\t<key>LibraryIdentifier</key>\n\t\t\t<string>{slice_id}</string>\n"
+        f"\t\t\t<key>LibraryPath</key>\n\t\t\t<string>{LIB_XCFW_DYLIB}</string>\n"
+        f"\t\t\t<key>SupportedArchitectures</key>\n\t\t\t<array>{archs_xml}\n\t\t\t</array>\n"
+        "\t\t\t<key>SupportedPlatform</key>\n\t\t\t<string>macos</string>\n"
+        "\t\t</dict>\n"
+        "\t</array>\n"
+        "\t<key>CFBundlePackageType</key>\n\t<string>XFWK</string>\n"
+        "\t<key>XCFrameworkFormatVersion</key>\n\t<string>1.0</string>\n"
+        "</dict>\n"
+        "</plist>\n"
+    )
+    print(f"[sulphur]   lib xcframework:    {dylib} ({' '.join(arches)})")
     print("[sulphur] Repackage done.\n")
 
 
@@ -426,7 +484,18 @@ def main() -> None:
         "--thorvg-version", default=None,
         help="ThorVG release version to auto-download if source is missing",
     )
+    parser.add_argument(
+        "--repackage-only", action="store_true",
+        help="re-run only the repackage step against the already-built artifacts",
+    )
     args, forwarded = parser.parse_known_args()
+
+    if args.repackage_only:
+        if args.platform == "macos":
+            _repackage_macos_lib_xcframework()
+        else:
+            sys.exit(f"[sulphur] --repackage-only is macos-only, got {args.platform!r}")
+        return
 
     _ensure_thorvg_cython()
 
@@ -513,6 +582,7 @@ def main() -> None:
 
     if args.platform == "macos":
         _repackage_macos_xcframework()
+        _repackage_macos_lib_xcframework()
     elif args.platform == "ios":
         _repackage_ios_xcframework()
     elif args.platform == "linux":
