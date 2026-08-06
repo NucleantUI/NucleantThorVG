@@ -33,6 +33,12 @@ let platformTarget = getPlatformTarget()
 // NucleantVulkan's Package.swift; see the binary targets below.
 let PIP_MODE = ProcessInfo.processInfo.environment["PIP_MODE"] == "1"
 
+// Opt-in only, never the default — see the identical flag in NucleantVulkan's
+// Package.swift for the full rationale. Must match between the two packages'
+// builds, since this file's makeThorNode(importingHardwareBuffer:) calls
+// straight into NucleantVulkan's WgpuContext.Target.nativeAndroidHardwareBuffer().
+let ANDROID_USE_AHARDWAREBUFFER = ProcessInfo.processInfo.environment["NUCLEANT_ANDROID_USE_AHARDWAREBUFFER"] == "1"
+
 /// Vendored Android artifacts for the ABI currently being built. Android
 /// builds one architecture per `swift build`, so unlike Linux there is no
 /// single lib directory. Mirrors NucleantVulkan's helper of the same name.
@@ -170,7 +176,8 @@ func mainTargets() -> [Target] {
             dependencies: [
                 "CThorVG",
                 .product(name: "NucleantVulkan", package: "NucleantVulkan")
-            ]
+            ],
+            swiftSettings: ANDROID_USE_AHARDWAREBUFFER ? [.define("NUCLEANT_ANDROID_USE_AHARDWAREBUFFER")] : []
         ),
         .testTarget(
             name: "NucleantThorVGTests",
