@@ -158,6 +158,13 @@ extension ThorShaderNode {
         let priorAccess: VkAccessFlags = isExternallyBacked
             ? VkAccessFlags(VK_ACCESS_MEMORY_WRITE_BIT.rawValue) | VkAccessFlags(VK_ACCESS_MEMORY_READ_BIT.rawValue)
             : VkAccessFlags(VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT.rawValue)
+        // Who reads the finished image: the composite pass's fragment shader,
+        // and — when this canvas is another node's texture input, as under a
+        // NucleantSwiftUI `.shader` effect — a compute dispatch later in the
+        // same command buffer. Both stages, so the transition is ordered
+        // against whichever consumer comes first.
+        let readerStages = VkPipelineStageFlags(VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT.rawValue)
+            | VkPipelineStageFlags(VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT.rawValue)
 
         if let pipeline = computePipeline,
            let layout   = computeLayout,
@@ -185,7 +192,7 @@ extension ThorShaderNode {
                 srcStage:  VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
                 dstLayout: VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
                 dstAccess: VkAccessFlags(VK_ACCESS_SHADER_READ_BIT.rawValue),
-                dstStage:  VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT
+                dstStage:  VkPipelineStageFlagBits(rawValue: readerStages)
             )
         } else {
             engineImageBarrier(
@@ -196,7 +203,7 @@ extension ThorShaderNode {
                 srcStage:  VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
                 dstLayout: VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
                 dstAccess: VkAccessFlags(VK_ACCESS_SHADER_READ_BIT.rawValue),
-                dstStage:  VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT
+                dstStage:  VkPipelineStageFlagBits(rawValue: readerStages)
             )
         }
         currentLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
