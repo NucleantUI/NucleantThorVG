@@ -125,7 +125,7 @@ extension VulkanRenderEngine {
             imageInfo.sType         = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO
             imageInfo.pNext         = UnsafeRawPointer(extPtr)
             imageInfo.imageType     = VK_IMAGE_TYPE_2D
-            imageInfo.format        = VK_FORMAT_B8G8R8A8_UNORM
+            imageInfo.format        = importedTextureFormat
             imageInfo.extent        = VkExtent3D(width: UInt32(width), height: UInt32(height), depth: 1)
             imageInfo.mipLevels     = 1
             imageInfo.arrayLayers   = 1
@@ -174,7 +174,7 @@ extension VulkanRenderEngine {
         viewInfo.sType    = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO
         viewInfo.image    = image
         viewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D
-        viewInfo.format   = VK_FORMAT_B8G8R8A8_UNORM
+        viewInfo.format   = compositeSampleFormat
         viewInfo.subresourceRange = VkImageSubresourceRange(
             aspectMask:     VkImageAspectFlags(VK_IMAGE_ASPECT_COLOR_BIT.rawValue),
             baseMipLevel:   0, levelCount: 1,
@@ -360,19 +360,25 @@ private func supportsLinearBgraStorage(_ physicalDevice: VkPhysicalDevice) -> Bo
     vkGetPhysicalDeviceFormatProperties(physicalDevice, VK_FORMAT_B8G8R8A8_UNORM, &props)
     return (props.linearTilingFeatures & VkFormatFeatureFlags(VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT.rawValue)) != 0
 }
-#elseif os(Linux)
+#elseif os(Linux) || os(Android)
 import NucleantVulkan
 import CVulkan
 import CThorVG
 
 extension VulkanRenderEngine {
 
-    /// Linux mirror of the Apple `makeThorWidgetNode(adopting:width:height:)`
+    /// Linux/Android mirror of the Apple `makeThorWidgetNode(adopting:width:height:)`
     /// above: a wgpu texture, a `Tvg_Canvas` targeting it, and a
     /// `ThorShaderNode` importing that texture's memory as a VkImage — zero
     /// copy, via `VK_KHR_external_memory_fd` instead of `VK_EXT_metal_objects`.
-    /// No storage-capable (canvas post shader) support yet — see the comment
-    /// on `WgpuContext.Target.exportedFd`.
+    /// Android shares this path by default rather than importing an
+    /// AHardwareBuffer: both go through wgpu's Vulkan backend, so both export
+    /// the same fd. The AHardwareBuffer path exists as an opt-in build only
+    /// (`NUCLEANT_ANDROID_USE_AHARDWAREBUFFER` in Package.swift) for cases the
+    /// fd path can't cover — e.g. an emulator whose virtualized Vulkan driver
+    /// doesn't expose VK_KHR_external_memory_fd. No storage-capable (canvas
+    /// post shader) support yet on either path — see the comment on
+    /// `WgpuContext.Target.exportedFd`.
     public func makeThorWidgetNode(
         adopting canvasBase: Tvg_Canvas? = nil,
         width:  Int,
@@ -386,24 +392,58 @@ extension VulkanRenderEngine {
             print("VulkanRenderEngine: wgpu target creation failed")
             return nil
         }
+        #if os(Android) && NUCLEANT_ANDROID_USE_AHARDWAREBUFFER
+        guard let hardwareBuffer = target.nativeAndroidHardwareBuffer() else {
+            print("VulkanRenderEngine: wgpu target has no AHardwareBuffer — device may lack "
+                  + "VK_ANDROID_external_memory_android_hardware_buffer")
+            target.release()
+            return nil
+        }
+        #else
         guard let fd = target.nativeVulkanExportedFd() else {
             print("VulkanRenderEngine: wgpu target has no exported fd — driver may lack VK_KHR_external_memory_fd")
             target.release()
             return nil
         }
+        #endif
         guard let canvas = canvasBase ?? tvg_wgcanvas_create(TVG_ENGINE_OPTION_DEFAULT) else {
             print("VulkanRenderEngine: tvg_wgcanvas_create failed")
             target.release()
             return nil
         }
 
-        guard let node = try? makeThorNode(
+        // Re-adopting an existing canvas (Android minimize/resume rebuilding
+        // the whole engine, retargeting the same Tvg_Canvas onto a fresh
+        // wgpu target): tvg_wgcanvas_set_target below refuses with
+        // TVG_RESULT_INSUFFICIENT_CONDITION unless the canvas's internal
+        // status is Synced — draw()/sync() every frame should already leave
+        // it there, but sync() unconditionally drives status back to Synced
+        // regardless of what it actually is (tvgCanvas.h's Impl::sync), so
+        // forcing it here is the correct, cheap way to guarantee the
+        // precondition rather than trust an inference about render-thread
+        // shutdown timing. A no-op on the freshly-created (canvasBase == nil)
+        // path, since a brand new canvas already starts Synced.
+        if canvasBase != nil {
+            _ = tvg_canvas_sync(canvas)
+        }
+
+        #if os(Android) && NUCLEANT_ANDROID_USE_AHARDWAREBUFFER
+        let built = try? makeThorNode(
+            canvas: canvas,
+            importingHardwareBuffer: hardwareBuffer,
+            width: width,
+            height: height
+        )
+        #else
+        let built = try? makeThorNode(
             canvas: canvas,
             importingFd: fd,
             width: width,
             height: height
-        ) else {
-            print("VulkanRenderEngine: makeThorNode(importingFd:) failed")
+        )
+        #endif
+        guard let node = built else {
+            print("VulkanRenderEngine: importing thor node failed")
             target.release()
             return nil
         }
@@ -428,6 +468,143 @@ extension VulkanRenderEngine {
         node.releaseExternal = { target.release() }
         return node
     }
+
+    #if os(Android) && NUCLEANT_ANDROID_USE_AHARDWAREBUFFER
+    /// The Android counterpart of `makeImportedImage(fd:)`, opt-in build only
+    /// (see `ANDROID_USE_AHARDWAREBUFFER` in Package.swift).
+    ///
+    /// Two things differ from the fd path beyond the handle type. The
+    /// allocation size and permitted memory types come from
+    /// `vkGetAndroidHardwareBufferPropertiesANDROID` rather than the image's
+    /// own requirements — the buffer already exists and dictates both. And the
+    /// entry point is resolved through `vkGetDeviceProcAddr`: it is an
+    /// extension function, absent unless the device enabled
+    /// VK_ANDROID_external_memory_android_hardware_buffer.
+    ///
+    /// The caller keeps its AHardwareBuffer reference; importing does not
+    /// consume it, unlike an fd.
+    func makeImportedImage(
+        hardwareBuffer: UnsafeMutableRawPointer,
+        width:  Int,
+        height: Int
+    ) throws -> (image: VkImage, view: VkImageView, memory: VkDeviceMemory?) {
+        typealias GetPropsFn = @convention(c) (
+            VkDevice?, UnsafeRawPointer?,
+            UnsafeMutablePointer<VkAndroidHardwareBufferPropertiesANDROID>?
+        ) -> VkResult
+
+        guard let symbol = vkGetDeviceProcAddr(device, "vkGetAndroidHardwareBufferPropertiesANDROID")
+        else {
+            throw VulkanEngineError.memory
+        }
+        let getProperties = unsafeBitCast(symbol, to: GetPropsFn.self)
+
+        var properties = VkAndroidHardwareBufferPropertiesANDROID()
+        properties.sType = VK_STRUCTURE_TYPE_ANDROID_HARDWARE_BUFFER_PROPERTIES_ANDROID
+        guard getProperties(device, UnsafeRawPointer(hardwareBuffer), &properties) == VK_SUCCESS
+        else {
+            throw VulkanEngineError.memory
+        }
+
+        // Same creation parameters as the exporting image, as the spec
+        // requires — matching what the wgpu side built.
+        var externalMemoryInfo = VkExternalMemoryImageCreateInfo()
+        externalMemoryInfo.sType = VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO
+        externalMemoryInfo.handleTypes = VkExternalMemoryHandleTypeFlags(
+            VK_EXTERNAL_MEMORY_HANDLE_TYPE_ANDROID_HARDWARE_BUFFER_BIT_ANDROID.rawValue
+        )
+
+        var image: VkImage?
+        let imageResult: VkResult = withUnsafePointer(to: &externalMemoryInfo) { extPtr in
+            var imageInfo = VkImageCreateInfo()
+            imageInfo.sType         = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO
+            imageInfo.pNext         = UnsafeRawPointer(extPtr)
+            imageInfo.imageType     = VK_IMAGE_TYPE_2D
+            imageInfo.format        = importedTextureFormat
+            imageInfo.extent        = VkExtent3D(width: UInt32(width), height: UInt32(height), depth: 1)
+            imageInfo.mipLevels     = 1
+            imageInfo.arrayLayers   = 1
+            imageInfo.samples       = VK_SAMPLE_COUNT_1_BIT
+            imageInfo.tiling        = VK_IMAGE_TILING_OPTIMAL
+            // SAMPLED only: this image is never a copy source/dest, only
+            // sampled during compositing. Adding Transfer{Src,Dst} would ask
+            // for more than wgpu's own export granted the underlying
+            // AHardwareBuffer (GPU_SAMPLED_IMAGE | GPU_COLOR_OUTPUT, no CPU_*
+            // bits — see makeTarget's matching comment in WgpuContext.swift),
+            // which is exactly what pushes the buffer onto a slow
+            // CPU-visible path on some drivers.
+            imageInfo.usage         = VkImageUsageFlags(
+                VK_IMAGE_USAGE_SAMPLED_BIT.rawValue
+            )
+            imageInfo.sharingMode   = VK_SHARING_MODE_EXCLUSIVE
+            imageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED
+            return vkCreateImage(device, &imageInfo, nil, &image)
+        }
+        guard imageResult == VK_SUCCESS, let image else {
+            throw VulkanEngineError.image
+        }
+
+        let dedicatedInfo = UnsafeMutablePointer<VkMemoryDedicatedAllocateInfo>.allocate(capacity: 1)
+        defer { dedicatedInfo.deallocate() }
+        dedicatedInfo.pointee = VkMemoryDedicatedAllocateInfo()
+        dedicatedInfo.pointee.sType = VK_STRUCTURE_TYPE_MEMORY_DEDICATED_ALLOCATE_INFO
+        dedicatedInfo.pointee.image = image
+
+        let importInfo = UnsafeMutablePointer<VkImportAndroidHardwareBufferInfoANDROID>.allocate(capacity: 1)
+        defer { importInfo.deallocate() }
+        importInfo.pointee = VkImportAndroidHardwareBufferInfoANDROID()
+        importInfo.pointee.sType = VK_STRUCTURE_TYPE_IMPORT_ANDROID_HARDWARE_BUFFER_INFO_ANDROID
+        importInfo.pointee.pNext = UnsafeRawPointer(dedicatedInfo)
+        importInfo.pointee.buffer = OpaquePointer(hardwareBuffer)
+
+        var memory: VkDeviceMemory?
+        var allocInfo = VkMemoryAllocateInfo()
+        allocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO
+        allocInfo.pNext = UnsafeRawPointer(importInfo)
+        // From the buffer, not the image: the allocation already exists.
+        allocInfo.allocationSize = properties.allocationSize
+        allocInfo.memoryTypeIndex = findMemoryType(
+            typeFilter: properties.memoryTypeBits,
+            properties: VkMemoryPropertyFlags(VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT.rawValue)
+        )
+        guard vkAllocateMemory(device, &allocInfo, nil, &memory) == VK_SUCCESS, let memory else {
+            vkDestroyImage(device, image, nil)
+            throw VulkanEngineError.memory
+        }
+        vkBindImageMemory(device, image, memory, 0)
+
+        var view: VkImageView?
+        var viewInfo = VkImageViewCreateInfo()
+        viewInfo.sType    = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO
+        viewInfo.image    = image
+        viewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D
+        // Same format the image was actually created with (importedTextureFormat,
+        // RGBA — see WgpuContext.targetPixelOrder's Android/AHardwareBuffer
+        // comment), not compositeSampleFormat. ThorVG's wg backend adopts
+        // the target's format (tvgWg_target_format.patch), so the bytes it
+        // writes are already correct RGBA when targetPixelOrder is
+        // .rgba8Unorm. Viewing them through compositeSampleFormat (always
+        // BGRA) would reinterpret those already-correct bytes as swapped —
+        // that reinterpretation is only a no-op on platforms where
+        // targetPixelOrder is already .bgra8Unorm (image format ==
+        // compositeSampleFormat). Matching the view format to the image and
+        // leaving the component mapping at identity (the default) is what
+        // makes this correct for both cases.
+        viewInfo.format   = importedTextureFormat
+        viewInfo.subresourceRange = VkImageSubresourceRange(
+            aspectMask:     VkImageAspectFlags(VK_IMAGE_ASPECT_COLOR_BIT.rawValue),
+            baseMipLevel:   0, levelCount: 1,
+            baseArrayLayer: 0, layerCount: 1
+        )
+        guard vkCreateImageView(device, &viewInfo, nil, &view) == VK_SUCCESS, let view else {
+            vkFreeMemory(device, memory, nil)
+            vkDestroyImage(device, image, nil)
+            throw VulkanEngineError.image
+        }
+
+        return (image, view, memory)
+    }
+    #endif
 
     /// Just the imported VkImage + view + memory from a POSIX fd exported via
     /// `VK_KHR_external_memory_fd` — the Linux mirror of
@@ -461,7 +638,7 @@ extension VulkanRenderEngine {
             imageInfo.sType         = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO
             imageInfo.pNext         = UnsafeRawPointer(extPtr)
             imageInfo.imageType     = VK_IMAGE_TYPE_2D
-            imageInfo.format        = VK_FORMAT_B8G8R8A8_UNORM
+            imageInfo.format        = importedTextureFormat
             imageInfo.extent        = VkExtent3D(width: UInt32(width), height: UInt32(height), depth: 1)
             imageInfo.mipLevels     = 1
             imageInfo.arrayLayers   = 1
@@ -517,7 +694,7 @@ extension VulkanRenderEngine {
         viewInfo.sType    = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO
         viewInfo.image    = image
         viewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D
-        viewInfo.format   = VK_FORMAT_B8G8R8A8_UNORM
+        viewInfo.format   = compositeSampleFormat
         viewInfo.subresourceRange = VkImageSubresourceRange(
             aspectMask:     VkImageAspectFlags(VK_IMAGE_ASPECT_COLOR_BIT.rawValue),
             baseMipLevel:   0, levelCount: 1,
@@ -548,9 +725,31 @@ extension VulkanRenderEngine {
         return (image, view, memory)
     }
 
+    #if os(Android) && NUCLEANT_ANDROID_USE_AHARDWAREBUFFER
+    /// Android mirror of `makeThorNode(importingFd:)`, opt-in build only.
+    func makeThorNode(
+        canvas:        Tvg_Canvas,
+        importingHardwareBuffer buffer: UnsafeMutableRawPointer,
+        width:         Int,
+        height:        Int
+    ) throws -> ThorShaderNode<RenderNode> {
+        let created = try makeImportedImage(hardwareBuffer: buffer, width: width, height: height)
+        return ThorShaderNode(
+            canvas:             ThorVulkanCanvas(base: canvas),
+            width:              UInt32(width),
+            height:             UInt32(height),
+            image:              created.image,
+            imageView:          created.view,
+            memory:             created.memory,
+            isExternallyBacked: true,
+            storageCapable:     false
+        )
+    }
+    #endif
+
     /// Create a `ThorShaderNode` whose VkImage is *imported* from a POSIX fd
-    /// (via `VK_KHR_external_memory_fd`) rather than allocated — the Linux
-    /// mirror of `makeThorNode(importingMetalTexture:)`.
+    /// (via `VK_KHR_external_memory_fd`) rather than allocated — the
+    /// Linux/Android mirror of `makeThorNode(importingMetalTexture:)`.
     func makeThorNode(
         canvas:       Tvg_Canvas,
         importingFd fd: Int32,
@@ -570,7 +769,7 @@ extension VulkanRenderEngine {
         )
     }
 
-    /// Linux mirror of `resizeThorNode` above: mint a new wgpu target +
+    /// Linux/Android mirror of `resizeThorNode` above: mint a new wgpu target +
     /// imported VkImage at the new size via the fd-import path instead of
     /// Metal, and swap it into the same `ThorShaderNode`. See the Apple
     /// version for the full rationale (identity, cache invalidation, etc.) —
@@ -594,20 +793,39 @@ extension VulkanRenderEngine {
             print("VulkanRenderEngine: wgpu target creation failed (resize)")
             return false
         }
+        #if os(Android) && NUCLEANT_ANDROID_USE_AHARDWAREBUFFER
+        guard let hardwareBuffer = target.nativeAndroidHardwareBuffer() else {
+            print("VulkanRenderEngine: wgpu target has no AHardwareBuffer (resize)")
+            target.release()
+            return false
+        }
+        #else
         guard let fd = target.nativeVulkanExportedFd() else {
             print("VulkanRenderEngine: wgpu target has no exported fd (resize)")
             target.release()
             return false
         }
+        #endif
 
         let created: (image: VkImage, view: VkImageView, memory: VkDeviceMemory?)
         do {
+            #if os(Android) && NUCLEANT_ANDROID_USE_AHARDWAREBUFFER
+            created = try makeImportedImage(
+                hardwareBuffer: hardwareBuffer, width: width, height: height
+            )
+            #else
             created = try makeImportedImage(fd: fd, width: width, height: height)
+            #endif
         } catch {
             print("VulkanRenderEngine: imported image (resize) failed: \(error)")
             target.release()
             return false
         }
+
+        // Same precondition as the bind path in makeThorWidgetNode: set_target
+        // fails with TVG_RESULT_INSUFFICIENT_CONDITION unless the canvas's
+        // internal status is Synced. Forcing it here too, not just at bind.
+        _ = tvg_canvas_sync(node.canvas.base)
 
         let result = tvg_wgcanvas_set_target(
             node.canvas.base,

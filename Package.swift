@@ -4,10 +4,35 @@
 import Foundation
 import PackageDescription
 
-let devMode = true
+/// Build against the sibling checkouts (`../NucleantVulkan`) or against GitHub.
+///
+/// Decided the same way in every Nucleant package, so one setting covers the
+/// whole chain: `NUCLEANT_LOCAL_DEV=1|0` in the environment wins; otherwise
+/// local when the sibling checkout exists next to this package — true in a
+/// development tree, false for a clone SwiftPM made under `.build/checkouts`,
+/// which is what lets a git consumer resolve the chain without editing
+/// anything. Path dependencies are not allowed in a package fetched by
+/// revision, so a hardcoded `true` on master breaks every remote consumer.
+let devMode: Bool = {
+    if let flag = ProcessInfo.processInfo.environment["NUCLEANT_LOCAL_DEV"] {
+        return ["1", "true", "yes"].contains(flag.lowercased())
+    }
+    let siblings = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
+    return FileManager.default.fileExists(atPath: siblings.appendingPathComponent("NucleantVulkan").path)
+}()
 let branch = "master"
 
 func getPlatformTarget() -> PackageDescription.Platform {
+    // Package.swift is compiled by the *host* toolchain even when
+    // cross-compiling, so `#if os(...)` only ever describes the host. Building
+    // for Android from this Linux box would otherwise resolve to `.linux` and
+    // link the Linux libthorvg. Android is always a cross-compile, so it is an
+    // explicit env-var opt-in — SWIFT_ANDROID_HOME, matching NucleantVulkan,
+    // CPython, PySwiftKit and PyNucleantUI.
+    let env = ProcessInfo.processInfo.environment
+    if env["SWIFT_ANDROID_HOME"] != nil || env["ANDROID_BUILD"] != nil {
+        return .android
+    }
 #if os(Linux)
     return .linux
 #else
@@ -16,6 +41,34 @@ func getPlatformTarget() -> PackageDescription.Platform {
 }
 
 let platformTarget = getPlatformTarget()
+
+// Set by pyswiftkit-builder for a wheel build — the signal that separates the
+// two macOS modes (`uv run` against a wheel vs. the Xcode app embedding this
+// package), which want the ThorVG binary in different shapes. Same use as in
+// NucleantVulkan's Package.swift; see the binary targets below.
+let PIP_MODE = ProcessInfo.processInfo.environment["PIP_MODE"] == "1"
+
+// Opt-in only, never the default — see the identical flag in NucleantVulkan's
+// Package.swift for the full rationale. Must match between the two packages'
+// builds, since this file's makeThorNode(importingHardwareBuffer:) calls
+// straight into NucleantVulkan's WgpuContext.Target.nativeAndroidHardwareBuffer().
+let ANDROID_USE_AHARDWAREBUFFER = ProcessInfo.processInfo.environment["NUCLEANT_ANDROID_USE_AHARDWAREBUFFER"] == "1"
+
+/// Vendored Android artifacts for the ABI currently being built. Android
+/// builds one architecture per `swift build`, so unlike Linux there is no
+/// single lib directory. Mirrors NucleantVulkan's helper of the same name.
+func androidABI() -> String {
+    let env = ProcessInfo.processInfo.environment
+    if let abi = env["SWIFT_ANDROID_ABI"], !abi.isEmpty {
+        return abi
+    }
+    switch (env["SWIFT_TRIPLE"] ?? "").split(separator: "-").first.map(String.init) ?? "" {
+    case "aarch64": return "arm64-v8a"
+    case "x86_64":  return "x86_64"
+    case "armv7":   return "armeabi-v7a"
+    default:        return "arm64-v8a"
+    }
+}
 
 func getDepedencies() -> [Package.Dependency] {
     var deps = [Package.Dependency]()
@@ -29,6 +82,30 @@ func getDepedencies() -> [Package.Dependency] {
 }
 
 func thorTargets() -> [Target] {
+    if platformTarget == .android {
+        // Vendored libthorvg-1.so per ABI under Dependencies/android/<abi>/lib
+        // — the same role Dependencies/linux/lib plays below. No -rpath: on
+        // Android the loader resolves DT_NEEDED out of the app's native
+        // library directory, where Gradle stages this .so, and a host path
+        // baked in at build time would not exist on device.
+        let packageRoot = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+        let androidLibDir = packageRoot
+            .appendingPathComponent("Dependencies/android/\(androidABI())/lib").path
+        return [
+            .target(
+                name: "CThorVG",
+                path: "Sources/CThorVG",
+                publicHeadersPath: "include",
+                cSettings: [
+                    .headerSearchPath("include"),
+                ],
+                linkerSettings: [
+                    .linkedLibrary("thorvg-1"),
+                    .unsafeFlags(["-L\(androidLibDir)"]),
+                ]
+            ),
+        ]
+    }
     if platformTarget == .linux {
         // Vendored libthorvg-1.so (built with the `wg`/WebGPU engine) in
         // Dependencies/linux/lib, linked directly — same role
@@ -56,7 +133,7 @@ func thorTargets() -> [Target] {
             ),
         ]
     }
-    return [
+    var targets: [Target] = [
         .binaryTarget(
             name: "ThorVG",
             path: "Dependencies/apple/ThorVG.xcframework"
@@ -70,9 +147,28 @@ func thorTargets() -> [Target] {
             name: "libomp",
             path: "Dependencies/apple/libomp.xcframework"
         ),
+    ]
+    // The same Mach-O as ThorVG.xcframework's macOS slice, minus the bundle:
+    // @rpath/libthorvg-1.dylib instead of @rpath/ThorVG.framework/ThorVG. A
+    // wheel vendors plain files into nucleant/.dylibs, so PIP_MODE links this
+    // one on macOS; the Xcode/embed path keeps the framework, and iOS links a
+    // framework either way. scripts/build_thorvg.py emits both from one build.
+    if PIP_MODE {
+        targets.append(
+            .binaryTarget(
+                name: "ThorVGLib",
+                path: "Dependencies/apple/ThorVG_lib.xcframework"
+            )
+        )
+    }
+    targets.append(
         .target(
             name: "CThorVG",
-            dependencies: [
+            dependencies: PIP_MODE ? [
+                .byName(name: "ThorVGLib", condition: .when(platforms: [.macOS])),
+                .byName(name: "ThorVG", condition: .when(platforms: [.iOS, .tvOS, .macCatalyst])),
+                .byName(name: "libomp", condition: .when(platforms: [.iOS])),
+            ] : [
                 "ThorVG",
                 .byName(name: "libomp", condition: .when(platforms: [.iOS])),
             ],
@@ -83,8 +179,9 @@ func thorTargets() -> [Target] {
             linkerSettings: [
                 .linkedFramework("QuartzCore", .when(platforms: [.iOS, .macOS, .tvOS])),
             ]
-        ),
-    ]
+        )
+    )
+    return targets
 }
 
 func mainTargets() -> [Target] {
@@ -94,7 +191,8 @@ func mainTargets() -> [Target] {
             dependencies: [
                 "CThorVG",
                 .product(name: "NucleantVulkan", package: "NucleantVulkan")
-            ]
+            ],
+            swiftSettings: ANDROID_USE_AHARDWAREBUFFER ? [.define("NUCLEANT_ANDROID_USE_AHARDWAREBUFFER")] : []
         ),
         .testTarget(
             name: "NucleantThorVGTests",
