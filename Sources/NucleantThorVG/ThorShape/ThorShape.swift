@@ -21,7 +21,7 @@ extension ThorShape {
 }
 
 public extension ThorShape {
-    func reset() -> Tvg_Result { tvg_shape_reset(base) }
+    @discardableResult func reset() -> Tvg_Result { tvg_shape_reset(base) }
     
     // move_to
     func move_to(x: Float, y: Float) -> Tvg_Result { tvg_shape_move_to(base, x, y) }
@@ -75,8 +75,12 @@ public extension ThorShape {
     func close() -> Tvg_Result { tvg_shape_close(base) }
 
     // append_rect
+    @discardableResult
     func append_rect(x: Float, y: Float, w: Float, h: Float, rx: Float = 0, ry: Float = 0, cw: Bool = true) -> Tvg_Result { tvg_shape_append_rect(base, x, y, w, h, rx, ry, cw) }
+    @discardableResult
     func append_rect<F: BinaryFloatingPoint>(x: F, y: F, w: F, h: F, rx: F = 0, ry: F = 0, cw: Bool = true) -> Tvg_Result { tvg_shape_append_rect(base, .init(x), .init(y), .init(w), .init(h), .init(rx), .init(ry), cw) }
+    
+    @discardableResult
     func append_rect(pos: SIMD2<Float>, size: SIMD2<Float>, radius: SIMD2<Float> = .zero, cw: Bool = true) -> Tvg_Result { tvg_shape_append_rect(base, pos.x, pos.y, size.x, size.y, radius.x, radius.y, cw) }
     func append_rect<F: BinaryFloatingPoint & SIMDScalar>(pos: SIMD2<F>, size: SIMD2<F>, radius: SIMD2<F> = .zero, cw: Bool = true) -> Tvg_Result { tvg_shape_append_rect(base, .init(pos.x), .init(pos.y), .init(size.x), .init(size.y), .init(radius.x), .init(radius.y), cw) }
 
@@ -198,15 +202,15 @@ public extension ThorShape {
     func set_trimpath<F: BinaryFloatingPoint>(begin: F, end: F, simultaneous: Bool = true) -> Tvg_Result { tvg_shape_set_trimpath(base, .init(begin), .init(end), simultaneous) }
 
     // fill color
-    func set_fill_color(r: UInt8, g: UInt8, b: UInt8, a: UInt8 = 255) -> Tvg_Result { tvg_shape_set_fill_color(base, r, g, b, a) }
-    func set_fill_color(_ color: SIMD4<UInt8>) -> Tvg_Result { tvg_shape_set_fill_color(base, color.x, color.y, color.z, color.w) }
-    func set_fill_color<F: BinaryFloatingPoint & SIMDScalar>(_ color: SIMD4<F>) -> Tvg_Result { tvg_shape_set_fill_color(base, UInt8(color.x * 255), UInt8(color.y * 255), UInt8(color.z * 255), UInt8(color.w * 255)) }
+    @discardableResult func set_fill_color(r: UInt8, g: UInt8, b: UInt8, a: UInt8 = 255) -> Tvg_Result { tvg_shape_set_fill_color(base, r, g, b, a) }
+    @discardableResult func set_fill_color(_ color: SIMD4<UInt8>) -> Tvg_Result { tvg_shape_set_fill_color(base, color.x, color.y, color.z, color.w) }
+    @discardableResult func set_fill_color<F: BinaryFloatingPoint & SIMDScalar>(_ color: SIMD4<F>) -> Tvg_Result { tvg_shape_set_fill_color(base, UInt8(color.x * 255), UInt8(color.y * 255), UInt8(color.z * 255), UInt8(color.w * 255)) }
     
-    func set_fill_color<C: ThorColor>(_ color: C) -> Tvg_Result where C.Value: BinaryFloatingPoint {
+    @discardableResult func set_fill_color<C: ThorColor>(_ color: C) -> Tvg_Result where C.Value: BinaryFloatingPoint {
         tvg_shape_set_fill_color(base, UInt8(color.r * 255), UInt8(color.g * 255), UInt8(color.b * 255), UInt8(color.a * 255))
     }
     
-    func set_fill_color<C: ThorColor>(_ color: C) -> Tvg_Result where C.Value == UInt8 {
+    @discardableResult func set_fill_color<C: ThorColor>(_ color: C) -> Tvg_Result where C.Value == UInt8 {
         tvg_shape_set_fill_color(base, color.r, color.g, color.b, color.a)
     }
     
@@ -222,7 +226,7 @@ public extension ThorShape {
     }
 
     // fill rule
-    func set_fill_rule(_ rule: Tvg_Fill_Rule) -> Tvg_Result { tvg_shape_set_fill_rule(base, rule) }
+    @discardableResult func set_fill_rule(_ rule: Tvg_Fill_Rule) -> Tvg_Result { tvg_shape_set_fill_rule(base, rule) }
     func get_fill_rule() -> Tvg_Fill_Rule {
         var rule = TVG_FILL_RULE_NON_ZERO
         tvg_shape_get_fill_rule(base, &rule)

@@ -37,7 +37,9 @@ public extension ThorScene {
     // Tvg_Result tvg_scene_add_effect_tint(Tvg_Scene scene, int black_r, int black_g, int black_b, int white_r, int white_g, int white_b, double intensity)
     // Tvg_Result tvg_scene_add_effect_tritone(Tvg_Scene scene, int shadow_r, int shadow_g, int shadow_b, int midtone_r, int midtone_g, int midtone_b, int highlight_r, int highlight_g, int highlight_b, int blend)
 
-    func add(paint: Tvg_Paint) -> Tvg_Result { tvg_scene_add(base, paint) }
+    @discardableResult func add(paint: Tvg_Paint) -> Tvg_Result { tvg_scene_add(base, paint) }
+    @discardableResult func add<S: ThorScene>(scene: S) -> Tvg_Result { tvg_scene_add(base, scene.base) }
+    @discardableResult func add<S: ThorShape>(shape: S) -> Tvg_Result { tvg_scene_add(base, shape.base) }
     func insert(target: Tvg_Paint, at: Tvg_Paint? = nil) -> Tvg_Result { tvg_scene_insert(base, target, at) }
     func remove(paint: Tvg_Paint) -> Tvg_Result { tvg_scene_remove(base, paint) }
     func clear_effects() -> Tvg_Result { tvg_scene_clear_effects(base) }

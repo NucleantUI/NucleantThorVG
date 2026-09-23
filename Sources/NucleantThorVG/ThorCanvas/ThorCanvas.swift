@@ -8,6 +8,7 @@ public protocol ThorCanvas {
     var base: Tvg_Canvas { get set }
     
     func add<S: ThorShape>(shape: S) -> Tvg_Result
+    func add<S: ThorScene>(scene: S) -> Tvg_Result
     func add(shape: Tvg_Paint) -> Tvg_Result
     func add<T>(shapes: T) -> Tvg_Result where T: Sequence, T.Element: ThorShape
     func add<T>(shapes: T) -> Tvg_Result where T: Sequence, T.Element == Tvg_Paint
@@ -27,10 +28,19 @@ public protocol ThorCanvas {
 
 public extension ThorCanvas {
     
+    @discardableResult
     func add<S: ThorShape>(shape: S) -> Tvg_Result {
         tvg_canvas_add(base, shape.base)
     }
     
+    /// A whole scene on the canvas — `add(shape:)`'s sibling, for a
+    /// picture made of grouped paints.
+    @discardableResult
+    func add<S: ThorScene>(scene: S) -> Tvg_Result {
+        tvg_canvas_add(base, scene.base)
+    }
+    
+    @discardableResult
     func add(shape: Tvg_Paint) -> Tvg_Result {
         tvg_canvas_add(base, shape)
     }
