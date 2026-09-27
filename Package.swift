@@ -28,7 +28,7 @@ func getPlatformTarget() -> PackageDescription.Platform {
     // for Android from this Linux box would otherwise resolve to `.linux` and
     // link the Linux libthorvg. Android is always a cross-compile, so it is an
     // explicit env-var opt-in — SWIFT_ANDROID_HOME, matching NucleantVulkan,
-    // CPython, PySwiftKit and PyNucleantUI.
+    // CPython and PySwiftKit.
     let env = ProcessInfo.processInfo.environment
     if env["SWIFT_ANDROID_HOME"] != nil || env["ANDROID_BUILD"] != nil {
         return .android

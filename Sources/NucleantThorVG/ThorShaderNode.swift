@@ -1,6 +1,6 @@
 //
 //  ThorShaderNode.swift
-//  PyNucleantUI
+//  NucleantThorVG
 //
 import NucleantVulkan
 import CVulkan
@@ -159,10 +159,9 @@ extension ThorShaderNode {
             ? VkAccessFlags(VK_ACCESS_MEMORY_WRITE_BIT.rawValue) | VkAccessFlags(VK_ACCESS_MEMORY_READ_BIT.rawValue)
             : VkAccessFlags(VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT.rawValue)
         // Who reads the finished image: the composite pass's fragment shader,
-        // and — when this canvas is another node's texture input, as under a
-        // NucleantSwiftUI `.shader` effect — a compute dispatch later in the
-        // same command buffer. Both stages, so the transition is ordered
-        // against whichever consumer comes first.
+        // and — when this canvas is another node's texture input — a compute
+        // dispatch later in the same command buffer. Both stages, so the
+        // transition is ordered against whichever consumer comes first.
         let readerStages = VkPipelineStageFlags(VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT.rawValue)
             | VkPipelineStageFlags(VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT.rawValue)
 

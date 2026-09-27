@@ -1,6 +1,6 @@
 //
 //  ThorVulkanCanvas.swift
-//  PyNucleantUI
+//  NucleantThorVG
 //
 
 import CThorVG
