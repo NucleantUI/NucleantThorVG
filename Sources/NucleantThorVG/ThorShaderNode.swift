@@ -130,7 +130,6 @@ extension ThorShaderNode {
             }
             return
         }
-        engine.warnedFailedNodes.remove(id)
         // node.dirty = false
         // ^ must NOT write back to the shader node: the slot observes it,
         //   so an engine-side write would fire onChange and re-mark the
