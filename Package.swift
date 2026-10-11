@@ -33,6 +33,11 @@ func getPlatformTarget() -> PackageDescription.Platform {
     if env["SWIFT_ANDROID_HOME"] != nil || env["ANDROID_BUILD"] != nil {
         return .android
     }
+    // WebAssembly (`swift build --swift-sdk <version>_wasm`) is a
+    // cross-compile too, opted into the same way as in NucleantVulkan.
+    if env["WASM_BUILD"] == "1" {
+        return .wasi
+    }
 #if os(Linux)
     return .linux
 #else
@@ -82,6 +87,34 @@ func getDepedencies() -> [Package.Dependency] {
 }
 
 func thorTargets() -> [Target] {
+    if platformTarget == .wasi {
+        // Vendored libthorvg.a for wasm32-wasip1 under Dependencies/wasm/lib,
+        // built with the `wg` engine by scripts/build_thorvg_wasm.py — the
+        // same role Dependencies/linux/lib plays above. Its webgpu.h calls
+        // resolve against NucleantVulkan's CWgpu, which on wasm is webgpu.h
+        // implemented on the browser's WebGPU — the device the Vulkan
+        // implementation runs on, so ThorVG draws straight into textures the
+        // engine samples. ThorVG is C++: libc++/libc++abi come from the wasm
+        // SDK's sysroot.
+        let packageRoot = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+        let wasmLibDir = packageRoot.appendingPathComponent("Dependencies/wasm/lib").path
+        return [
+            .target(
+                name: "CThorVG",
+                path: "Sources/CThorVG",
+                publicHeadersPath: "include",
+                cSettings: [
+                    .headerSearchPath("include"),
+                ],
+                linkerSettings: [
+                    .linkedLibrary("thorvg-1"),
+                    .linkedLibrary("c++"),
+                    .linkedLibrary("c++abi"),
+                    .unsafeFlags(["-L\(wasmLibDir)"]),
+                ]
+            ),
+        ]
+    }
     if platformTarget == .android {
         // Vendored libthorvg-1.so per ABI under Dependencies/android/<abi>/lib
         // — the same role Dependencies/linux/lib plays below. No -rpath: on
