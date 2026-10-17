@@ -18,7 +18,11 @@ let devMode: Bool = {
         return ["1", "true", "yes"].contains(flag.lowercased())
     }
     let siblings = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
-    return FileManager.default.fileExists(atPath: siblings.appendingPathComponent("NucleantVulkan").path)
+    // Never in a `checkouts` directory (SwiftPM's, Xcode's): there the
+    // "sibling" is the consumer's own checkout of NucleantVulkan, and taking
+    // it as a path dependency leaves the graph unresolvable.
+    return siblings.lastPathComponent != "checkouts"
+        && FileManager.default.fileExists(atPath: siblings.appendingPathComponent("NucleantVulkan").path)
 }()
 
 func getPlatformTarget() -> PackageDescription.Platform {

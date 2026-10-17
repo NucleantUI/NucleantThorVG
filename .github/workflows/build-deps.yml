@@ -123,13 +123,12 @@ jobs:
     timeout-minutes: 360
     steps:
       - uses: actions/checkout@v7
-      # ThorVG's build (patchelf makes the library relocatable), and
-      # NucleantVulkan's system libraries for the tests.
+      # ThorVG's build (patchelf makes the library relocatable). The tests
+      # need nothing: NucleantVulkan's bundle carries its libraries.
       - name: System packages
         run: >
           apt-get update && apt-get install -y
           g++ git curl unzip python3 meson ninja-build pkg-config patchelf
-          libvulkan-dev libwayland-dev libxcb1-dev libx11-dev libshaderc-dev libspirv-cross-c-shared-dev
       - name: wgpu-native from NucleantVulkan ${{ env.VULKAN_VERSION }}
         run: |
           git clone --depth 1 --branch "$VULKAN_VERSION" https://github.com/NucleantUI/NucleantVulkan ../NucleantVulkan
