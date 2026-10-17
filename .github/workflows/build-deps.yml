@@ -65,8 +65,6 @@ jobs:
           mkdir -p ../NucleantVulkan/Dependencies/macos
           ditto -x -k wgpu.zip ../NucleantVulkan/Dependencies/macos
           rm wgpu.zip
-          # A stray backup inside the committed framework, not part of it.
-          rm -f Dependencies/apple/ThorVG.xcframework/macos-arm64_x86_64/ThorVG.framework/Versions/A/*.bak
       # macOS a step per architecture, then the fat binary in both
       # xcframeworks. thorvg-cython builds iOS's device and simulator slices
       # (and libomp's) in one go.

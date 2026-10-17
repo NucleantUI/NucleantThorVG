@@ -139,15 +139,43 @@ def _ensure_thorvg_cython() -> None:
                    cwd=str(THORVG_CYTHON_DIR), check=True)
 
 
+MACOS_FRAMEWORK_PLIST = """<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleExecutable</key>
+    <string>ThorVG</string>
+    <key>CFBundleIdentifier</key>
+    <string>org.thorvg.ThorVG</string>
+    <key>CFBundleName</key>
+    <string>ThorVG</string>
+    <key>CFBundlePackageType</key>
+    <string>FMWK</string>
+    <key>CFBundleVersion</key>
+    <string>1.0</string>
+    <key>CFBundleShortVersionString</key>
+    <string>1.0</string>
+    <key>MinimumOSVersion</key>
+    <string>11.0</string>
+</dict>
+</plist>
+"""
+
+
 def _repackage_macos_xcframework() -> None:
-    """Copy the freshly-built fat dylib into ThorVG.xcframework.
+    """Build ThorVG.xcframework's macOS slice from the freshly-built fat
+    dylib — from scratch, nothing of a previous one kept, so it needs no
+    committed Dependencies/ (the iOS build adds its slices after).
 
     macOS requires a versioned framework layout (not a shallow bundle):
         ThorVG.framework/
           Versions/A/ThorVG          ← real binary
+          Versions/A/Headers/thorvg.h
           Versions/A/Resources/Info.plist
           Versions/Current           → A
           ThorVG                     → Versions/Current/ThorVG
+          Headers                    → Versions/Current/Headers
           Resources                  → Versions/Current/Resources
     """
     if not FAT_DYLIB_SRC.exists():
@@ -156,32 +184,32 @@ def _repackage_macos_xcframework() -> None:
 
     print(f"\n[sulphur] Repackaging ThorVG.xcframework ...")
 
-    # Ensure versioned directories exist
-    resources_dir = XCFW_BINARY.parent / "Resources"
-    resources_dir.mkdir(parents=True, exist_ok=True)
-
-    # Copy binary and fix install name
-    shutil.copy2(str(FAT_DYLIB_SRC), str(XCFW_BINARY))
-    subprocess.run(
-        ["install_name_tool", "-id", XCFW_INSTALL_NAME, str(XCFW_BINARY)],
-        check=True,
-    )
-    print(f"[sulphur]   xcframework binary: {XCFW_BINARY}")
-
-    # Rebuild versioned symlinks at framework root (idempotent)
-    current_link = XCFW_FW_DIR / "Versions" / "Current"
-    for link, target in [
-        (current_link,              "A"),
-        (XCFW_FW_DIR / "ThorVG",   "Versions/Current/ThorVG"),
-        (XCFW_FW_DIR / "Resources", "Versions/Current/Resources"),
-    ]:
-        if link.is_symlink() or link.exists():
-            link.unlink()
-        link.symlink_to(target)
+    stage = SCRIPT_DIR / ".work" / "macos_framework"
+    if stage.exists():
+        shutil.rmtree(stage)
+    framework = stage / "ThorVG.framework"
+    version_a = framework / "Versions" / "A"
+    (version_a / "Headers").mkdir(parents=True)
+    (version_a / "Resources").mkdir()
+    binary = version_a / "ThorVG"
+    shutil.copy2(str(FAT_DYLIB_SRC), str(binary))
+    subprocess.run(["install_name_tool", "-id", XCFW_INSTALL_NAME, str(binary)], check=True)
+    shutil.copy2(str(THORVG_ROOT / "inc" / "thorvg.h"), str(version_a / "Headers" / "thorvg.h"))
+    (version_a / "Resources" / "Info.plist").write_text(MACOS_FRAMEWORK_PLIST)
+    (framework / "Versions" / "Current").symlink_to("A")
+    for name in ("ThorVG", "Headers", "Resources"):
+        (framework / name).symlink_to(f"Versions/Current/{name}")
 
     # install_name_tool invalidated the signature, and an arm64 slice will not
-    # load unsigned: sign the bundle again (ad hoc), its _CodeSignature too.
-    subprocess.run(["codesign", "--force", "--sign", "-", str(XCFW_FW_DIR)], check=True)
+    # load unsigned: sign the bundle (ad hoc).
+    subprocess.run(["codesign", "--force", "--sign", "-", str(framework)], check=True)
+
+    if NUCLEANT_XCFW.exists():
+        shutil.rmtree(NUCLEANT_XCFW)
+    NUCLEANT_XCFW.parent.mkdir(parents=True, exist_ok=True)
+    subprocess.run(["xcodebuild", "-create-xcframework", "-framework", str(framework),
+                    "-output", str(NUCLEANT_XCFW)], check=True)
+    print(f"[sulphur]   xcframework: {NUCLEANT_XCFW}")
 
     # Also refresh the loose dylib (used by Python bindings etc.)
     LOOSE_DYLIB_DST.parent.mkdir(parents=True, exist_ok=True)

@@ -78,23 +78,28 @@ func androidABI() -> String {
     }
 }
 
-/// Each prebuilt archive on this release's GitHub release, by file name: its
-/// URL and checksum. Written here by .github/workflows/release.yml on the
-/// release commit — in this file, not one it reads, because SwiftPM caches a
-/// manifest's evaluation by its text (and environment), not by the files it
-/// looks at. Empty on master.
+/// Each prebuilt archive on the latest GitHub release, by file name: its URL
+/// and checksum. Written here by .github/workflows/release.yml, which commits
+/// it to master with the release — so master and the release's tag both
+/// build from exactly the archives on that release. In this file, not one it
+/// reads, because SwiftPM caches a manifest's evaluation by its text (and
+/// environment), not by the files it looks at. Empty only before the first
+/// release.
 let releasedThorVG: [String: (url: String, checksum: String)] = [:]
 
-/// ThorVG comes prebuilt: from the release (above), or, with
-/// NUCLEANT_THORVG_ARTIFACTS=1, from Artifacts/ — the archives
-/// .github/workflows/build-deps.yml builds, put there to build and test
-/// against. Otherwise it comes from the vendored Dependencies/.
-let prebuiltThorVG = !releasedThorVG.isEmpty
-    || ProcessInfo.processInfo.environment["NUCLEANT_THORVG_ARTIFACTS"] == "1"
+/// With NUCLEANT_THORVG_ARTIFACTS=1, the archives in Artifacts/ — the ones
+/// .github/workflows/build-deps.yml has just built, put there to build and
+/// test against. They come before the release's, which they are about to
+/// replace.
+let localArtifacts = ProcessInfo.processInfo.environment["NUCLEANT_THORVG_ARTIFACTS"] == "1"
 
-/// A prebuilt archive as a binary target: the release's URL, else Artifacts/.
+/// ThorVG comes prebuilt: from Artifacts/ (above), or from the release.
+/// Otherwise — before the first release — from the vendored Dependencies/.
+let prebuiltThorVG = localArtifacts || !releasedThorVG.isEmpty
+
+/// A prebuilt archive as a binary target: Artifacts/, else the release's URL.
 func prebuiltBinary(_ name: String, _ archive: String) -> Target {
-    if let release = releasedThorVG[archive] {
+    if !localArtifacts, let release = releasedThorVG[archive] {
         return .binaryTarget(name: name, url: release.url, checksum: release.checksum)
     }
     return .binaryTarget(name: name, path: "Artifacts/\(archive)")
