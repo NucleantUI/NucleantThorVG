@@ -5,6 +5,17 @@ SulphurCore build wrapper for thorvg.
 Clones thorvg-cython next to SulphurCore if not already present,
 then delegates to its build_thorvg.py script.
 
+wgpu-native (the `wg` engine links it) comes from the sibling NucleantVulkan
+checkout on every platform: Dependencies/macos/wgpu_native.xcframework
+(macOS, iOS), Dependencies/linux and Dependencies/android/<abi> — in CI,
+NucleantVulkan's release archives unpacked there.
+
+macOS one architecture at a time (what CI does, a step each):
+
+    python scripts/build_thorvg.py macos --gpu=vulkan --target-arch arm64
+    python scripts/build_thorvg.py macos --gpu=vulkan --target-arch x86_64
+    python scripts/build_thorvg.py macos --repackage-only
+
 After a macOS/iOS/linux build this script also repackages the built binary
 into Dependencies/apple/ or Dependencies/linux/ so downstream builds pick up
 the new symbols.
@@ -42,13 +53,19 @@ SULPHUR_ROOT = SCRIPT_DIR.parent
 DEV_ROOT     = SULPHUR_ROOT.parent
 
 THORVG_CYTHON_DIR    = DEV_ROOT / "thorvg-cython"
-THORVG_CYTHON_REPO   = "https://github.com/kivy/thorvg-cython.git"
+THORVG_CYTHON_REPO   = "https://github.com/Py-Swift/thorvg-cython.git"
+# The commit every platform is built with: its build script, cross files and
+# patches are part of what ends up in the binaries.
+THORVG_CYTHON_REF    = "2ccda447dc5e4de0eaba8c7c73dd97f35b9e5951"
+# The ThorVG release thorvg-cython downloads when it has no source yet — the
+# same one scripts/build_thorvg_wasm.py builds.
+THORVG_VERSION       = "1.0.5"
 THORVG_BUILD_SCRIPT  = THORVG_CYTHON_DIR / "tools" / "build_thorvg.py"
 
 # wgpu-native XCFramework (built by NucleantVulkan/scripts/build_wgpu.py) — the
 # ThorVG `wg` engine links against it. For iOS we stage its slices into the
 # per-arch layout build_thorvg.py's pkg-config wiring expects.
-WGPU_XCFRAMEWORK = DEV_ROOT / "NucleantVulkan" / "Dependencies" / "wgpu_native.xcframework"
+WGPU_XCFRAMEWORK = DEV_ROOT / "NucleantVulkan" / "Dependencies" / "macos" / "wgpu_native.xcframework"
 
 # iOS thorvg.xcframework build_thorvg.py emits, and where we fold it in.
 THORVG_IOS_XCFW  = THORVG_CYTHON_DIR / "thorvg" / "output" / "thorvg.xcframework"
@@ -75,6 +92,9 @@ LOOSE_DYLIB_DST = SULPHUR_ROOT / "Dependencies" / "apple" / "macos" / "libthorvg
 THORVG_LINUX_SO_DIR = THORVG_ROOT / "output" / f"linux_{platform.machine()}"
 # Where NucleantThorVG vendors it — mirrors Dependencies/apple/.
 NUCLEANT_LINUX_DIR  = SULPHUR_ROOT / "Dependencies" / "linux"
+# wgpu-native for Linux, vendored by NucleantVulkan/scripts/build_wgpu.py
+# --prefix: lib/libwgpu_native.so and include/{webgpu.h,wgpu.h}.
+WGPU_LINUX_DIR      = DEV_ROOT / "NucleantVulkan" / "Dependencies" / "linux"
 
 # Android: build_thorvg.py emits one directory per architecture, named after
 # the Meson cross file rather than the ABI. Package.swift and Gradle both work
@@ -114,10 +134,9 @@ def _ensure_thorvg_cython() -> None:
         print(f"[sulphur] thorvg-cython found at {THORVG_CYTHON_DIR}")
         return
     print(f"[sulphur] Cloning thorvg-cython into {THORVG_CYTHON_DIR} ...")
-    subprocess.run(
-        ["git", "clone", "--depth=1", THORVG_CYTHON_REPO, str(THORVG_CYTHON_DIR)],
-        check=True,
-    )
+    subprocess.run(["git", "clone", THORVG_CYTHON_REPO, str(THORVG_CYTHON_DIR)], check=True)
+    subprocess.run(["git", "checkout", "--quiet", THORVG_CYTHON_REF],
+                   cwd=str(THORVG_CYTHON_DIR), check=True)
 
 
 def _repackage_macos_xcframework() -> None:
@@ -159,6 +178,10 @@ def _repackage_macos_xcframework() -> None:
         if link.is_symlink() or link.exists():
             link.unlink()
         link.symlink_to(target)
+
+    # install_name_tool invalidated the signature, and an arm64 slice will not
+    # load unsigned: sign the bundle again (ad hoc), its _CodeSignature too.
+    subprocess.run(["codesign", "--force", "--sign", "-", str(XCFW_FW_DIR)], check=True)
 
     # Also refresh the loose dylib (used by Python bindings etc.)
     LOOSE_DYLIB_DST.parent.mkdir(parents=True, exist_ok=True)
@@ -224,21 +247,73 @@ def _repackage_linux() -> None:
     fat dylib into Dependencies/apple/. Package.swift's Linux `CThorVG`
     target links this directly (unsafeFlags -L/-l + an -rpath back to this
     same directory), not through pkg-config.
+
+    One file, made relocatable with patchelf, so it loads wherever it is
+    copied — next to an executable, as SwiftPM does with an artifact bundle's
+    library, or into a wheel:
+      * SONAME libthorvg-1.so, the one file there is (not .so.1, a file
+        nobody ships next to it);
+      * wgpu by name, libwgpu_native.so: it has no SONAME, so the link
+        recorded the absolute path meson resolved it to;
+      * RUNPATH $ORIGIN instead of that build machine's directory.
     """
-    so_files = list(THORVG_LINUX_SO_DIR.glob("libthorvg-1.so*"))
-    if not so_files:
-        print(f"[sulphur] WARNING: no libthorvg-1.so* found in {THORVG_LINUX_SO_DIR} — skipping Dependencies/linux repackage")
+    built = THORVG_LINUX_SO_DIR / "libthorvg-1.so"
+    if not built.is_file():
+        print(f"[sulphur] WARNING: no libthorvg-1.so found in {THORVG_LINUX_SO_DIR} — skipping Dependencies/linux repackage")
         return
+    if shutil.which("patchelf") is None:
+        sys.exit("[sulphur] patchelf not found (apt install patchelf)")
 
     print(f"\n[sulphur] Repackaging Dependencies/linux ...")
 
     lib_dir = NUCLEANT_LINUX_DIR / "lib"
     lib_dir.mkdir(parents=True, exist_ok=True)
+    for old in lib_dir.glob("libthorvg-1.so*"):
+        old.unlink()
+    so = lib_dir / "libthorvg-1.so"
+    shutil.copy2(str(built), str(so))
 
-    for f in so_files:
-        shutil.copy2(str(f), str(lib_dir / f.name))
-    print(f"[sulphur]   libs: {lib_dir}")
+    needed = subprocess.check_output(["patchelf", "--print-needed", str(so)], text=True).split()
+    for name in needed:
+        if name != "libwgpu_native.so" and name.endswith("/libwgpu_native.so"):
+            subprocess.run(["patchelf", "--replace-needed", name, "libwgpu_native.so", str(so)], check=True)
+    subprocess.run(["patchelf", "--set-soname", "libthorvg-1.so", str(so)], check=True)
+    subprocess.run(["patchelf", "--set-rpath", "$ORIGIN", str(so)], check=True)
+    needed = subprocess.check_output(["patchelf", "--print-needed", str(so)], text=True).split()
+    if any("/" in name for name in needed):
+        sys.exit(f"[sulphur] {so} still needs a library by path: {needed}")
+    print(f"[sulphur]   {so}: needs {' '.join(needed)}")
     print("[sulphur] Repackage done.\n")
+
+
+def _stage_wgpu_pkgconfig(name: str, stage: Path, include_dir: Path, lib_dir: Path,
+                          libs: str) -> str:
+    """A pkg-config directory holding only wgpu-native, as `name`.pc, with
+    its headers under include/webgpu/ (the wg engine does `#include
+    <webgpu/webgpu.h>`; wgpu-native ships them flat). Returned for
+    PKG_CONFIG_LIBDIR, which *replaces* the default search path: the build
+    machine's libpng/libjpeg stay invisible and thorvg builds its bundled
+    decoders, as it does for every other platform."""
+    inc = stage / "include" / "webgpu"
+    pc_dir = stage / "pc"
+    inc.mkdir(parents=True, exist_ok=True)
+    pc_dir.mkdir(parents=True, exist_ok=True)
+    for header in ("webgpu.h", "wgpu.h"):
+        src = include_dir / header
+        if not src.is_file():
+            sys.exit(f"[sulphur] wgpu-native header not found: {src}")
+        shutil.copy2(src, inc / header)
+    (pc_dir / f"{name}.pc").write_text(
+        f"libdir={lib_dir}\n"
+        f"includedir={include_dir}\n"
+        "\n"
+        f"Name: {name}\n"
+        "Description: wgpu-native (WebGPU) for the ThorVG wg engine\n"
+        "Version: 29.0.1.1\n"
+        f"Cflags: -I{stage / 'include'}\n"
+        f"Libs: {libs}\n"
+    )
+    return str(pc_dir)
 
 
 def _stage_wgpu_android(abi: str) -> str:
@@ -491,16 +566,33 @@ def main() -> None:
     args, forwarded = parser.parse_known_args()
 
     if args.repackage_only:
-        if args.platform == "macos":
-            _repackage_macos_lib_xcframework()
-        else:
+        if args.platform != "macos":
             sys.exit(f"[sulphur] --repackage-only is macos-only, got {args.platform!r}")
+        # After a build per architecture (--target-arch): the fat dylib.
+        thin = [THORVG_ROOT / "output" / f"macos_{arch}" / "libthorvg-1.dylib" for arch in ("arm64", "x86_64")]
+        if all(path.is_file() for path in thin):
+            FAT_DYLIB_SRC.parent.mkdir(parents=True, exist_ok=True)
+            subprocess.run(["lipo", "-create", *map(str, thin), "-output", str(FAT_DYLIB_SRC)], check=True)
+            _repackage_macos_xcframework()
+        _repackage_macos_lib_xcframework()
         return
 
     _ensure_thorvg_cython()
 
     env = os.environ.copy()
-    if args.platform == "ios":
+    if args.platform == "macos":
+        if not WGPU_XCFRAMEWORK.is_dir():
+            sys.exit(f"[sulphur] wgpu XCFramework not found at {WGPU_XCFRAMEWORK} — "
+                     f"run NucleantVulkan/scripts/build_wgpu.py first")
+        # thorvg-cython's macOS build finds wgpu through pkg-config alone: the
+        # xcframework's macOS slice (fat), linked as @rpath/libwgpu_native.dylib.
+        wgpu_macos = WGPU_XCFRAMEWORK / "macos-arm64_x86_64"
+        pc_dir = _stage_wgpu_pkgconfig(
+            "wgpu_native", SCRIPT_DIR / ".work" / "wgpu_stage" / "macos",
+            wgpu_macos / "Headers", wgpu_macos, f"-L{wgpu_macos} -lwgpu_native")
+        env["PKG_CONFIG_LIBDIR"] = pc_dir
+        env["PKG_CONFIG_PATH"] = pc_dir
+    elif args.platform == "ios":
         if not WGPU_XCFRAMEWORK.is_dir():
             sys.exit(f"[sulphur] wgpu XCFramework not found at {WGPU_XCFRAMEWORK} — "
                      f"run NucleantVulkan/scripts/build_wgpu.py first")
@@ -520,6 +612,9 @@ def main() -> None:
                 "build it first: python3 ../NucleantVulkan/scripts/build_wgpu.py "
                 "--android"
             )
+        # thorvg-cython stages each ABI's wgpu itself from here
+        # (<abi>/lib, include/), so every ABI links its own.
+        env["THORVG_ANDROID_WGPU_ROOT"] = str(WGPU_ANDROID_DIR)
         # thorvg-cython builds every ABI in one invocation, so one
         # PKG_CONFIG_LIBDIR has to serve them all — see the note in main()
         # below about which ABIs that actually yields.
@@ -534,22 +629,26 @@ def main() -> None:
         if not any(a.startswith("--gpu") for a in forwarded):
             forwarded = ["--gpu=vulkan"] + forwarded
     elif args.platform == "linux":
-        if shutil.which("pkg-config") is None or subprocess.run(
-            ["pkg-config", "--exists", "wgpu-native"]
-        ).returncode != 0:
+        if not (WGPU_LINUX_DIR / "lib" / "libwgpu_native.so").is_file():
             sys.exit(
-                "[sulphur] wgpu-native not found via pkg-config — build it first, "
-                "e.g.: python3 ../NucleantVulkan/scripts/build_wgpu.py --prefix ~/.local "
-                "&& export PKG_CONFIG_PATH=~/.local/lib/pkgconfig:$PKG_CONFIG_PATH"
+                f"[sulphur] wgpu-native not found in {WGPU_LINUX_DIR} — build it first: "
+                "python3 ../NucleantVulkan/scripts/build_wgpu.py --prefix ../NucleantVulkan/Dependencies/linux"
             )
+        # thorvg-cython asks pkg-config for `wgpu-native`; this is the only
+        # one it sees.
+        pc_dir = _stage_wgpu_pkgconfig(
+            "wgpu-native", SCRIPT_DIR / ".work" / "wgpu_stage" / "linux",
+            WGPU_LINUX_DIR / "include", WGPU_LINUX_DIR / "lib",
+            f"-L{WGPU_LINUX_DIR / 'lib'} -lwgpu_native")
+        env["PKG_CONFIG_LIBDIR"] = pc_dir
+        env["PKG_CONFIG_PATH"] = pc_dir
         # Default to the `wg` (WebGPU) engine, unless the caller forwarded
         # their own --gpu.
         if not any(a.startswith("--gpu") for a in forwarded):
             forwarded = ["--gpu=vulkan"] + forwarded
 
     cmd = [sys.executable, str(THORVG_BUILD_SCRIPT), args.platform]
-    if args.thorvg_version:
-        cmd += [f"--version={args.thorvg_version}"]
+    cmd += [f"--version={args.thorvg_version or THORVG_VERSION}"]
     cmd += forwarded
 
     print(f"[sulphur] Running: {' '.join(cmd)}")
@@ -581,6 +680,11 @@ def main() -> None:
             _build_android_abi(abi, arch_name, gpu)
 
     if args.platform == "macos":
+        if any(a.startswith("--target-arch") for a in forwarded) and not any(
+                a in ("universal", "--target-arch=universal") for a in forwarded):
+            print("[sulphur] one architecture built; `macos --repackage-only` "
+                  "makes the fat binary once both are")
+            return
         _repackage_macos_xcframework()
         _repackage_macos_lib_xcframework()
     elif args.platform == "ios":

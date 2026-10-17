@@ -1,0 +1,285 @@
+# Builds ThorVG for every platform from source, packages it as the archives
+# its binary targets take, and builds and tests NucleantThorVG against them —
+# one machine per platform (Linux: per architecture):
+#
+#   apple    ThorVG, ThorVG_lib, libomp  (.xcframework.zip each)
+#   linux    nucleantthorvg-linux-<x86_64|aarch64>.artifactbundle.zip   libthorvg-1.so
+#   android  nucleantthorvg-android-<abi>.artifactbundle.zip            libthorvg-1.so
+#   wasm     nucleantthorvg-wasm32.artifactbundle.zip                   libthorvg-1.a
+#
+# ThorVG's wg engine links wgpu-native: each machine takes it from
+# NucleantVulkan's release (VULKAN_VERSION, the one Package.swift depends
+# on), unpacked into a checkout of that release next to this one, where
+# scripts/build_thorvg.py looks for it. ThorVG links the very library a
+# consumer gets with NucleantVulkan.
+#
+# The archives are this run's artifacts ("thorvg-*"). Run it by hand to check
+# that the dependencies still build; release.yml runs it for each release
+# and attaches the archives to it.
+
+name: build-deps
+
+on:
+  workflow_dispatch:
+    inputs:
+      platform:
+        description: Platform to build (all, or one to retry)
+        type: choice
+        options: [all, apple, linux, android, wasm]
+        default: all
+  workflow_call:
+    inputs:
+      version:
+        description: Version written into the artifact bundles' info.json
+        type: string
+        default: 0.0.0
+
+env:
+  SWIFT_VERSION: 6.3.3
+  VERSION: ${{ inputs.version || '0.0.0' }}
+  # The NucleantVulkan release whose wgpu-native ThorVG is built against.
+  VULKAN_VERSION: 0.0.1
+  # NucleantVulkan from GitHub, by version: the sibling checkout below only
+  # holds wgpu-native for the build.
+  NUCLEANT_LOCAL_DEV: "0"
+  # Package.swift takes ThorVG from Artifacts/, where the tests put it.
+  NUCLEANT_THORVG_ARTIFACTS: "1"
+
+jobs:
+  apple:
+    if: inputs.platform == '' || inputs.platform == 'all' || inputs.platform == 'apple'
+    runs-on: macos-15
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+      - run: |
+          pip install meson ninja
+          brew install pkgconf
+      - name: wgpu-native from NucleantVulkan ${{ env.VULKAN_VERSION }}
+        run: |
+          git clone --depth 1 --branch "$VULKAN_VERSION" https://github.com/NucleantUI/NucleantVulkan ../NucleantVulkan
+          curl -fsSL -o wgpu.zip "https://github.com/NucleantUI/NucleantVulkan/releases/download/$VULKAN_VERSION/wgpu_native.xcframework.zip"
+          mkdir -p ../NucleantVulkan/Dependencies/macos
+          ditto -x -k wgpu.zip ../NucleantVulkan/Dependencies/macos
+          rm wgpu.zip
+          # A stray backup inside the committed framework, not part of it.
+          rm -f Dependencies/apple/ThorVG.xcframework/macos-arm64_x86_64/ThorVG.framework/Versions/A/*.bak
+      # macOS a step per architecture, then the fat binary in both
+      # xcframeworks. thorvg-cython builds iOS's device and simulator slices
+      # (and libomp's) in one go.
+      - name: ThorVG macOS arm64
+        run: python scripts/build_thorvg.py macos --gpu=vulkan --target-arch arm64
+      - name: ThorVG macOS x86_64
+        run: python scripts/build_thorvg.py macos --gpu=vulkan --target-arch x86_64
+      - name: ThorVG macOS xcframeworks
+        run: |
+          python scripts/build_thorvg.py macos --repackage-only
+          binary=Dependencies/apple/ThorVG.xcframework/macos-arm64_x86_64/ThorVG.framework/Versions/A/ThorVG
+          lipo -archs "$binary" | grep -qw arm64
+          lipo -archs "$binary" | grep -qw x86_64
+          otool -L "$binary" | grep -q "@rpath/libwgpu_native.dylib"
+          codesign --verify --deep Dependencies/apple/ThorVG.xcframework/macos-arm64_x86_64/ThorVG.framework
+      - name: ThorVG iOS (device + simulator)
+        run: python scripts/build_thorvg.py ios --gpu=vulkan
+      - name: Package
+        run: |
+          mkdir -p dist
+          for x in ThorVG ThorVG_lib libomp; do
+            ditto -c -k --keepParent "Dependencies/apple/$x.xcframework" "dist/$x.xcframework.zip"
+          done
+          ls -l dist
+      - uses: actions/upload-artifact@v7
+        with:
+          name: thorvg-apple
+          path: dist/*.zip
+      - name: Install Swift ${{ env.SWIFT_VERSION }}
+        run: |
+          release="swift-${SWIFT_VERSION}-RELEASE"
+          curl -fsSLO "https://download.swift.org/swift-${SWIFT_VERSION}-release/xcode/${release}/${release}-osx.pkg"
+          installer -pkg "${release}-osx.pkg" -target CurrentUserHomeDirectory
+          echo "$HOME/Library/Developer/Toolchains/${release}.xctoolchain/usr/bin" >> "$GITHUB_PATH"
+      - name: Test against them
+        run: |
+          mkdir -p Artifacts && cp dist/*.zip Artifacts/
+          swift test
+
+  linux:
+    name: linux (${{ matrix.arch }})
+    # A machine per architecture: a Linux machine builds and tests its own.
+    # In Swift's own image, which has the toolchain; GCC builds ThorVG (its
+    # OpenMP is libgomp).
+    if: inputs.platform == '' || inputs.platform == 'all' || inputs.platform == 'linux'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { arch: x86_64, runner: ubuntu-24.04 }
+          - { arch: aarch64, runner: ubuntu-24.04-arm }
+    runs-on: ${{ matrix.runner }}
+    container: swift:6.3.3-noble
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v7
+      # ThorVG's build (patchelf makes the library relocatable), and
+      # NucleantVulkan's system libraries for the tests.
+      - name: System packages
+        run: >
+          apt-get update && apt-get install -y
+          g++ git curl unzip python3 meson ninja-build pkg-config patchelf
+          libvulkan-dev libwayland-dev libxcb1-dev libx11-dev libshaderc-dev libspirv-cross-c-shared-dev
+      - name: wgpu-native from NucleantVulkan ${{ env.VULKAN_VERSION }}
+        run: |
+          git clone --depth 1 --branch "$VULKAN_VERSION" https://github.com/NucleantUI/NucleantVulkan ../NucleantVulkan
+          curl -fsSL -o wgpu.zip "https://github.com/NucleantUI/NucleantVulkan/releases/download/$VULKAN_VERSION/nucleantvulkan-linux-${{ matrix.arch }}.artifactbundle.zip"
+          unzip -q wgpu.zip -d wgpu
+          linux=../NucleantVulkan/Dependencies/linux
+          mkdir -p $linux/lib $linux/include
+          cp wgpu/Libraries.artifactbundle/lib/libwgpu_native.so $linux/lib/
+          cp ../NucleantVulkan/Sources/CWgpuLinux/include/webgpu.h ../NucleantVulkan/Sources/CWgpuLinux/include/wgpu.h $linux/include/
+          rm -r wgpu wgpu.zip
+      - name: ThorVG ${{ matrix.arch }}
+        run: |
+          # Only this machine's build goes into the bundle, not the committed library.
+          rm -rf Dependencies/linux/lib
+          python3 scripts/build_thorvg.py linux
+      - name: Package ${{ matrix.arch }}
+        run: >
+          python3 scripts/make_artifactbundle.py --triple ${{ matrix.arch }}-unknown-linux-gnu
+          --library Dependencies/linux/lib/libthorvg-1.so
+          --name nucleantthorvg-linux-${{ matrix.arch }} --output dist --version "$VERSION"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: thorvg-linux-${{ matrix.arch }}
+          path: dist/*.zip
+      - name: Test against it, ${{ matrix.arch }}
+        run: |
+          mkdir -p Artifacts && cp dist/*.zip Artifacts/
+          swift test
+
+  android:
+    # Both ABIs on one machine — thorvg-cython builds them in one go — in
+    # Swift's image for the cross-compile after.
+    if: inputs.platform == '' || inputs.platform == 'all' || inputs.platform == 'android'
+    runs-on: ubuntu-24.04
+    container: swift:6.3.3-noble
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v7
+      - run: >
+          apt-get update && apt-get install -y
+          g++ git curl unzip python3 meson ninja-build pkg-config
+      # NDK r28, as NucleantVulkan's Android build.
+      - uses: nttld/setup-ndk@v1
+        id: ndk
+        with:
+          ndk-version: r28c
+          add-to-path: false
+      - run: echo "ANDROID_NDK_HOME=${{ steps.ndk.outputs.ndk-path }}" >> "$GITHUB_ENV"
+      - name: wgpu-native from NucleantVulkan ${{ env.VULKAN_VERSION }}
+        run: |
+          git clone --depth 1 --branch "$VULKAN_VERSION" https://github.com/NucleantUI/NucleantVulkan ../NucleantVulkan
+          android=../NucleantVulkan/Dependencies/android
+          mkdir -p $android/include
+          cp ../NucleantVulkan/Sources/CWgpuLinux/include/webgpu.h ../NucleantVulkan/Sources/CWgpuLinux/include/wgpu.h $android/include/
+          for abi in arm64-v8a x86_64; do
+            curl -fsSL -o wgpu.zip "https://github.com/NucleantUI/NucleantVulkan/releases/download/$VULKAN_VERSION/nucleantvulkan-android-$abi.artifactbundle.zip"
+            unzip -q wgpu.zip -d wgpu
+            mkdir -p $android/$abi/lib
+            cp wgpu/Libraries.artifactbundle/lib/libwgpu_native.so $android/$abi/lib/
+            rm -r wgpu wgpu.zip
+          done
+      - name: ThorVG arm64-v8a + x86_64
+        run: |
+          rm -rf Dependencies/android
+          python3 scripts/build_thorvg.py android
+      - name: Package arm64-v8a
+        run: >
+          python3 scripts/make_artifactbundle.py --triple aarch64-unknown-linux-android28
+          --library Dependencies/android/arm64-v8a/lib/libthorvg-1.so
+          --name nucleantthorvg-android-arm64-v8a --output dist --version "$VERSION"
+      - name: Package x86_64
+        run: >
+          python3 scripts/make_artifactbundle.py --triple x86_64-unknown-linux-android28
+          --library Dependencies/android/x86_64/lib/libthorvg-1.so
+          --name nucleantthorvg-android-x86_64 --output dist --version "$VERSION"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: thorvg-android
+          path: dist/*.zip
+      - name: Swift's Android SDK
+        run: |
+          release="swift-${SWIFT_VERSION}-RELEASE"
+          swift sdk install \
+            "https://download.swift.org/swift-${SWIFT_VERSION}-release/android-sdk/${release}/${release}_android.artifactbundle.tar.gz" \
+            --checksum d160cc3206dd1886dae3fef2337af5e25ec034692cd0ec225721c56cc69da7f5
+          # Links the NDK's sysroot into the SDK.
+          # Wherever SwiftPM put the bundle (not necessarily under $HOME in a container).
+          setup=$(find / -path /proc -prune -o -path "*${release}_android.artifactbundle*" -name setup-android-sdk.sh -print 2>/dev/null | head -1)
+          echo "setup script: $setup"
+          if [ -z "$setup" ]; then
+            find / -path /proc -prune -o -type d -name "${release}_android.artifactbundle" -print 2>/dev/null | head -1 | xargs -I{} find {} -maxdepth 3
+            exit 1
+          fi
+          "$setup"
+      # Cross-compiled: builds and links the tests, which no device runs here.
+      - run: mkdir -p Artifacts && cp dist/*.zip Artifacts/
+      - name: Build against it, arm64-v8a
+        env:
+          ANDROID_BUILD: "1"
+          SWIFT_ANDROID_ABI: arm64-v8a
+        run: swift build --swift-sdk aarch64-unknown-linux-android28 --build-tests
+      - name: Build against it, x86_64
+        env:
+          ANDROID_BUILD: "1"
+          SWIFT_ANDROID_ABI: x86_64
+        run: swift build --swift-sdk x86_64-unknown-linux-android28 --build-tests
+
+  wasm:
+    # build_thorvg_wasm.py compiles with the clang of the swift.org toolchain
+    # matching the wasm SDK, from ~/Library/Developer/Toolchains.
+    if: inputs.platform == '' || inputs.platform == 'all' || inputs.platform == 'wasm'
+    runs-on: macos-15
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+      - name: Install Swift ${{ env.SWIFT_VERSION }} and its wasm SDK
+        run: |
+          release="swift-${SWIFT_VERSION}-RELEASE"
+          curl -fsSLO "https://download.swift.org/swift-${SWIFT_VERSION}-release/xcode/${release}/${release}-osx.pkg"
+          installer -pkg "${release}-osx.pkg" -target CurrentUserHomeDirectory
+          bin="$HOME/Library/Developer/Toolchains/${release}.xctoolchain/usr/bin"
+          "$bin/swift" sdk install \
+            "https://download.swift.org/swift-${SWIFT_VERSION}-release/wasm-sdk/${release}/${release}_wasm.artifactbundle.tar.gz" \
+            --checksum cabfa08b73bb8ac783927ecd15fa386e99d0c139c5f232445067bcf58379cae7
+          echo "TOOLCHAIN_BIN=$bin" >> "$GITHUB_ENV"
+      - run: |
+          pip install meson ninja
+          brew install pkgconf
+      # webgpu.h (CWgpuWasm's) to compile against, and Web/ for the tests:
+      # from the release, there is nothing to link on wasm until the app.
+      - name: NucleantVulkan ${{ env.VULKAN_VERSION }}
+        run: git clone --depth 1 --branch "$VULKAN_VERSION" https://github.com/NucleantUI/NucleantVulkan ../NucleantVulkan
+      - name: ThorVG
+        run: |
+          rm -rf Dependencies/wasm
+          python scripts/build_thorvg_wasm.py
+      - name: Package
+        run: >
+          python scripts/make_artifactbundle.py --triple wasm32-unknown-wasip1
+          --library Dependencies/wasm/lib/libthorvg-1.a
+          --name nucleantthorvg-wasm32 --output dist --version "$VERSION" --ar "$TOOLCHAIN_BIN/llvm-ar"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: thorvg-wasm32
+          path: dist/*.zip
+      # In headless Chrome on the page's WebGPU.
+      - name: Test against it
+        run: |
+          mkdir -p Artifacts && cp dist/*.zip Artifacts/
+          python scripts/run_wasm_tests.py

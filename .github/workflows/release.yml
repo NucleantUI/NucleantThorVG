@@ -1,0 +1,188 @@
+# Releases NucleantThorVG, run by hand with the version to release:
+#
+#   1. check     the version is X.Y.Z and not tagged yet;
+#   2. deps      builds and tests every platform's ThorVG from source
+#                (build-deps.yml), the archives as artifacts;
+#   3. release   makes the release commit on top of the commit it ran on, and
+#                tags it with the version:
+#                  * Package.swift's `releasedThorVG` filled in: each
+#                    archive's URL on this release and its checksum (from
+#                    `swift package compute-checksum`, which a url binary
+#                    target must carry), which make them binary targets
+#                    that SwiftPM downloads only for the platform and
+#                    architecture being built;
+#                  * no Dependencies/: the vendored libraries stay on master.
+#                Then pushes the tag and publishes the GitHub release with
+#                the archives;
+#   4. verify    a new package that depends on the release by its version and
+#                builds against it on Linux: the URLs, checksums and manifest
+#                as a consumer gets them.
+#
+# The release commit is on the tag only, never on master. The tag is pushed
+# with GITHUB_TOKEN, so it starts no workflow.
+
+name: release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Version to release, X.Y.Z (the tag)
+        type: string
+        required: true
+
+permissions:
+  contents: write
+
+env:
+  TAG: ${{ inputs.version }}
+
+jobs:
+  check:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Version
+        run: |
+          semver='^[0-9]+\.[0-9]+\.[0-9]+$'
+          [[ "$TAG" =~ $semver ]] || { echo "::error::version $TAG is not X.Y.Z"; exit 1; }
+          if git ls-remote --exit-code --tags "https://github.com/$GITHUB_REPOSITORY" "refs/tags/$TAG" >/dev/null; then
+            echo "::error::$TAG is already tagged"; exit 1
+          fi
+
+  deps:
+    needs: check
+    uses: ./.github/workflows/build-deps.yml
+    with:
+      version: ${{ inputs.version }}
+
+  release:
+    needs: deps
+    runs-on: ubuntu-24.04
+    # Swift's image, to evaluate the release commit's manifest before it is
+    # published.
+    container: swift:6.3.3-noble
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      NUCLEANT_LOCAL_DEV: "0"
+    steps:
+      - uses: actions/checkout@v7
+      - name: System packages
+        run: apt-get update && apt-get install -y gh python3
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: thorvg-*
+          path: dist
+          merge-multiple: true
+      # Every archive Package.swift names: a missing one would leave its
+      # binary target pointing at Artifacts/, which a consumer has not got.
+      - name: All the archives
+        run: |
+          ls -l dist
+          for archive in \
+            ThorVG.xcframework.zip ThorVG_lib.xcframework.zip libomp.xcframework.zip \
+            nucleantthorvg-linux-x86_64.artifactbundle.zip nucleantthorvg-linux-aarch64.artifactbundle.zip \
+            nucleantthorvg-android-arm64-v8a.artifactbundle.zip nucleantthorvg-android-x86_64.artifactbundle.zip \
+            nucleantthorvg-wasm32.artifactbundle.zip
+          do
+            [ -f "dist/$archive" ] || { echo "::error::no $archive"; exit 1; }
+          done
+      - name: Release commit
+        run: |
+          python3 - <<'EOF'
+          import os, pathlib, subprocess
+
+          def checksum(path):
+              return subprocess.run(["swift", "package", "compute-checksum", str(path)],
+                                    check=True, capture_output=True, text=True).stdout.strip()
+
+          base = f"https://github.com/{os.environ['GITHUB_REPOSITORY']}/releases/download/{os.environ['TAG']}"
+          entries = "".join(
+              f'    "{path.name}": (\n'
+              f'        url: "{base}/{path.name}",\n'
+              f'        checksum: "{checksum(path)}"\n'
+              f'    ),\n'
+              for path in sorted(pathlib.Path("dist").glob("*.zip"))
+          )
+          manifest = pathlib.Path("Package.swift")
+          text = manifest.read_text()
+
+          empty = "let releasedThorVG: [String: (url: String, checksum: String)] = [:]\n"
+          assert empty in text, "Package.swift has no empty releasedThorVG to fill in"
+          text = text.replace(empty, empty.replace("[:]", "[\n" + entries + "]"))
+
+          manifest.write_text(text)
+          EOF
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          git diff Package.swift
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git rm -r -q Dependencies
+          git add Package.swift
+          git commit -q -m "Release $TAG: ThorVG from the release's archives"
+      # The manifest as a consumer evaluates it (no sibling NucleantVulkan
+      # here, so not local): it must evaluate, without unsafeFlags, and with
+      # every dependency by version, as SwiftPM requires of a package
+      # depended on by version.
+      - name: Release manifest
+        run: |
+          swift package dump-package > manifest.json
+          python3 - <<'EOF'
+          import json
+          manifest = json.load(open("manifest.json"))
+          assert "unsafeFlags" not in json.dumps(manifest["targets"]), "the release manifest has unsafeFlags"
+          for dependency in manifest["dependencies"]:
+              for kind, (spec, *_) in dependency.items():
+                  requirement = spec.get("requirement", {})
+                  assert kind == "sourceControl" and ("range" in requirement or "exact" in requirement), \
+                      f"{spec.get('identity')}: not depended on by version ({kind} {requirement})"
+          EOF
+          rm manifest.json
+      - name: Tag and publish
+        run: |
+          git tag "$TAG"
+          git push origin "refs/tags/$TAG"
+          # A draft until every archive is up, so nobody resolves a release
+          # that is missing one.
+          gh release create "$TAG" dist/*.zip --verify-tag --draft --title "$TAG" \
+            --notes "Prebuilt ThorVG for every platform; SwiftPM downloads the one it builds for."
+          gh release edit "$TAG" --draft=false
+
+  verify:
+    needs: release
+    runs-on: ubuntu-24.04
+    container: swift:6.3.3-noble
+    steps:
+      # NucleantVulkan's system libraries; ThorVG's own (libstdc++, libgomp)
+      # come with the image.
+      - name: System packages
+        run: >
+          apt-get update && apt-get install -y
+          libvulkan-dev libwayland-dev libxcb1-dev libx11-dev libshaderc-dev libspirv-cross-c-shared-dev
+      - name: Build a package that depends on the release
+        run: |
+          mkdir -p consumer/Sources/Consumer && cd consumer
+          cat > Package.swift <<EOF
+          // swift-tools-version: 6.2
+          import PackageDescription
+
+          let package = Package(
+              name: "Consumer",
+              platforms: [.macOS(.v14)],
+              dependencies: [
+                  .package(url: "https://github.com/$GITHUB_REPOSITORY", exact: "$TAG"),
+              ],
+              targets: [
+                  .executableTarget(name: "Consumer", dependencies: [
+                      .product(name: "NucleantThorVG", package: "NucleantThorVG"),
+                  ]),
+              ]
+          )
+          EOF
+          cat > Sources/Consumer/main.swift <<'EOF'
+          import NucleantThorVG
+
+          print("NucleantThorVG resolved and linked")
+          EOF
+          swift build
+          swift run Consumer

@@ -20,7 +20,6 @@ let devMode: Bool = {
     let siblings = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
     return FileManager.default.fileExists(atPath: siblings.appendingPathComponent("NucleantVulkan").path)
 }()
-let branch = "master"
 
 func getPlatformTarget() -> PackageDescription.Platform {
     // Package.swift is compiled by the *host* toolchain even when
@@ -75,18 +74,94 @@ func androidABI() -> String {
     }
 }
 
+/// Each prebuilt archive on this release's GitHub release, by file name: its
+/// URL and checksum. Written here by .github/workflows/release.yml on the
+/// release commit — in this file, not one it reads, because SwiftPM caches a
+/// manifest's evaluation by its text (and environment), not by the files it
+/// looks at. Empty on master.
+let releasedThorVG: [String: (url: String, checksum: String)] = [:]
+
+/// ThorVG comes prebuilt: from the release (above), or, with
+/// NUCLEANT_THORVG_ARTIFACTS=1, from Artifacts/ — the archives
+/// .github/workflows/build-deps.yml builds, put there to build and test
+/// against. Otherwise it comes from the vendored Dependencies/.
+let prebuiltThorVG = !releasedThorVG.isEmpty
+    || ProcessInfo.processInfo.environment["NUCLEANT_THORVG_ARTIFACTS"] == "1"
+
+/// A prebuilt archive as a binary target: the release's URL, else Artifacts/.
+func prebuiltBinary(_ name: String, _ archive: String) -> Target {
+    if let release = releasedThorVG[archive] {
+        return .binaryTarget(name: name, url: release.url, checksum: release.checksum)
+    }
+    return .binaryTarget(name: name, path: "Artifacts/\(archive)")
+}
+
+/// One of Dependencies/apple's xcframeworks, or its prebuilt zip.
+func appleBinary(_ name: String, _ xcframework: String) -> Target {
+    if prebuiltThorVG {
+        return prebuiltBinary(name, "\(xcframework).zip")
+    }
+    return .binaryTarget(name: name, path: "Dependencies/apple/\(xcframework)")
+}
+
+/// ThorVG on Linux, Android and wasm, as one artifact bundle per platform and
+/// architecture (scripts/make_artifactbundle.py). On Linux and Android the
+/// bundle holds libthorvg-1.so itself — SwiftPM copies it next to the product
+/// and links it, beside NucleantVulkan's libwgpu_native.so, which it links.
+func prebuiltLibrariesArchive() -> String {
+    switch platformTarget {
+    case .wasi:
+        return "nucleantthorvg-wasm32.artifactbundle.zip"
+    case .android:
+        return "nucleantthorvg-android-\(androidABI()).artifactbundle.zip"
+    default:
+        // Linux builds are native, so the host's architecture is the target's.
+#if arch(arm64)
+        return "nucleantthorvg-linux-aarch64.artifactbundle.zip"
+#else
+        return "nucleantthorvg-linux-x86_64.artifactbundle.zip"
+#endif
+    }
+}
+
+/// CThorVG over the prebuilt bundle, off Apple's platforms. No unsafeFlags —
+/// SwiftPM refuses them in a package depended on by version — so the binary
+/// target gives the library and CThorVG keeps only its header.
+func prebuiltThorTargets() -> [Target] {
+    return [
+        prebuiltBinary("ThorVGLibraries", prebuiltLibrariesArchive()),
+        .target(
+            name: "CThorVG",
+            dependencies: ["ThorVGLibraries"],
+            path: "Sources/CThorVG",
+            publicHeadersPath: "include",
+            cSettings: [
+                .headerSearchPath("include"),
+            ],
+            // ThorVG is C++: on wasm, libc++/libc++abi from the SDK's sysroot.
+            linkerSettings: platformTarget == .wasi ? [
+                .linkedLibrary("c++"),
+                .linkedLibrary("c++abi"),
+            ] : []
+        ),
+    ]
+}
+
 func getDepedencies() -> [Package.Dependency] {
     var deps = [Package.Dependency]()
     if devMode {
         deps.append(.package(path: "../NucleantVulkan"))
     } else {
-        deps.append(.package(url: "https://github.com/NucleantUI/NucleantVulkan", branch: branch))
+        deps.append(.package(url: "https://github.com/NucleantUI/NucleantVulkan", from: "0.0.1"))
     }
     //deps.append(.package(path: "../NucleantCore"))
     return deps
 }
 
 func thorTargets() -> [Target] {
+    if prebuiltThorVG && [.wasi, .android, .linux].contains(platformTarget) {
+        return prebuiltThorTargets()
+    }
     if platformTarget == .wasi {
         // Vendored libthorvg.a for wasm32-wasip1 under Dependencies/wasm/lib,
         // built with the `wg` engine by scripts/build_thorvg_wasm.py — the
@@ -167,19 +242,13 @@ func thorTargets() -> [Target] {
         ]
     }
     var targets: [Target] = [
-        .binaryTarget(
-            name: "ThorVG",
-            path: "Dependencies/apple/ThorVG.xcframework"
-        ),
+        appleBinary("ThorVG", "ThorVG.xcframework"),
         // libomp (dynamic OpenMP) — iOS only. The iOS ThorVG.framework links
         // @rpath/libomp.framework/libomp, so it must be embedded; SPM does that
         // when CThorVG depends on this binary target. macOS's ThorVG statically
         // links libomp, so this xcframework carries iOS slices only and is only
         // depended on for iOS.
-        .binaryTarget(
-            name: "libomp",
-            path: "Dependencies/apple/libomp.xcframework"
-        ),
+        appleBinary("libomp", "libomp.xcframework"),
     ]
     // The same Mach-O as ThorVG.xcframework's macOS slice, minus the bundle:
     // @rpath/libthorvg-1.dylib instead of @rpath/ThorVG.framework/ThorVG. A
@@ -187,12 +256,7 @@ func thorTargets() -> [Target] {
     // one on macOS; the Xcode/embed path keeps the framework, and iOS links a
     // framework either way. scripts/build_thorvg.py emits both from one build.
     if PIP_MODE {
-        targets.append(
-            .binaryTarget(
-                name: "ThorVGLib",
-                path: "Dependencies/apple/ThorVG_lib.xcframework"
-            )
-        )
+        targets.append(appleBinary("ThorVGLib", "ThorVG_lib.xcframework"))
     }
     targets.append(
         .target(

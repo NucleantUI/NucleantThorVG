@@ -2,7 +2,7 @@
 
 `libthorvg-1.so` is vendored here (`lib/`), committed into the repo, the
 same way `Dependencies/apple/` vendors the macOS/iOS xcframeworks — built
-via [thorvg-cython](https://github.com/kivy/thorvg-cython) with the `wg`
+via [thorvg-cython](https://github.com/Py-Swift/thorvg-cython) with the `wg`
 (WebGPU) engine enabled, since no distro packages thorvg with that engine.
 
 `CThorVG`'s Linux target links this directly (`-L`/`-l` plus an `-rpath`
@@ -15,26 +15,25 @@ dependency).
 
 wgpu-native itself (thorvg's `wg` engine *build-time* dependency) is not
 vendored here — see `NucleantVulkan/Dependencies/linux/README.md`, it's
-vendored there instead and only needs to be discoverable via pkg-config
-while *building* thorvg (meson resolves it that way); nothing about running
-the resulting `libthorvg-1.so` depends on pkg-config.
+vendored there instead, and `scripts/build_thorvg.py` hands it to thorvg's
+meson build through a pkg-config file of its own (the only one meson sees,
+so thorvg builds its bundled png/jpg decoders rather than linking the
+machine's); nothing about running the resulting `libthorvg-1.so` depends on
+pkg-config.
 
 ## 1. wgpu-native first
 
 ```
 python3 ../NucleantVulkan/scripts/build_wgpu.py --prefix ../NucleantVulkan/Dependencies/linux
-export PKG_CONFIG_PATH="$(pwd)/../NucleantVulkan/Dependencies/linux/lib/pkgconfig:$PKG_CONFIG_PATH"
 ```
 
 See `NucleantVulkan/Dependencies/linux/README.md` for the full prerequisites
-(Rust via rustup, `libclang-dev`). `PKG_CONFIG_PATH` is only needed for this
-build step (thorvg-cython's meson build resolving `dependency('wgpu_native')`)
-— not for building this package afterwards.
+(Rust via rustup, `libclang-dev`).
 
 ## 2. Build + vendor thorvg
 
 ```
-pip install --user meson ninja   # or: sudo apt install meson ninja-build
+sudo apt install meson ninja-build pkg-config patchelf
 python3 scripts/build_thorvg.py linux
 ```
 
@@ -42,7 +41,12 @@ This clones `thorvg-cython` next to this repo (if missing), builds thorvg
 with the `wg` engine (`--gpu=vulkan`, thorvg's own flag name for "enable the
 WebGPU engine") and the CAPI bindings, then copies the result here:
 
-* `Dependencies/linux/lib/libthorvg-1.so*`
+* `Dependencies/linux/lib/libthorvg-1.so`
+
+one file, made relocatable with patchelf: SONAME `libthorvg-1.so`, wgpu
+needed by name (`libwgpu_native.so`, not the path it was linked from) and
+RUNPATH `$ORIGIN` — so it loads next to wgpu wherever both are copied, as
+SwiftPM does with the release's artifact bundle.
 
 No headers are vendored here — `Sources/CThorVG/include/thorvg_capi.h` (the
 same hand-vendored CAPI header the macOS/iOS builds already use — the
