@@ -194,7 +194,7 @@ func getDepedencies() -> [Package.Dependency] {
     if devMode {
         deps.append(.package(path: "../NucleantVulkan"))
     } else {
-        deps.append(.package(url: "https://github.com/NucleantUI/NucleantVulkan", from: "0.0.1"))
+        deps.append(.package(url: "https://github.com/NucleantUI/NucleantVulkan", .upToNextMinor(from: "0.0.1")))
     }
     //deps.append(.package(path: "../NucleantCore"))
     return deps
