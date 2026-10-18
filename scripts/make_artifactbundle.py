@@ -2,7 +2,7 @@
 """Package one platform's ThorVG as a SwiftPM artifact bundle:
 
     <output>/<name>.artifactbundle.zip
-        Libraries.artifactbundle/
+        <name>.artifactbundle/
             info.json            one "staticLibrary" artifact per library
             lib/lib<name>.so|.a  each library
 
@@ -19,7 +19,7 @@ these platforms.) On wasm it is libthorvg-1.a: the browser has no loader.
 
     python3 scripts/make_artifactbundle.py --triple x86_64-unknown-linux-gnu \\
         --library Dependencies/linux/lib/libthorvg-1.so \\
-        --name nucleantthorvg-linux-x86_64 --output dist
+        --name thorvg-linux-x86_64 --output dist
 
 --library is repeatable; `--library libfoo.a=a.a,b.a` names a merged
 archive. --ar (an MRI-capable archiver: llvm-ar, GNU ar) does the merging.
@@ -60,7 +60,7 @@ def main() -> int:
 
     args.output.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory() as temp:
-        bundle = Path(temp) / "Libraries.artifactbundle"
+        bundle = Path(temp) / f"{args.name}.artifactbundle"
         lib_dir = bundle / "lib"
         lib_dir.mkdir(parents=True)
         artifacts = {}

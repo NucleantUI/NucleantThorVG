@@ -88,9 +88,9 @@ jobs:
           ls -l dist
           for archive in \
             ThorVG.xcframework.zip ThorVG_lib.xcframework.zip libomp.xcframework.zip \
-            nucleantthorvg-linux-x86_64.artifactbundle.zip nucleantthorvg-linux-aarch64.artifactbundle.zip \
-            nucleantthorvg-android-arm64-v8a.artifactbundle.zip nucleantthorvg-android-x86_64.artifactbundle.zip \
-            nucleantthorvg-wasm32.artifactbundle.zip
+            thorvg-linux-x86_64.artifactbundle.zip thorvg-linux-aarch64.artifactbundle.zip \
+            thorvg-android-arm64-v8a.artifactbundle.zip thorvg-android-x86_64.artifactbundle.zip \
+            thorvg-wasm32.artifactbundle.zip
           do
             [ -f "dist/$archive" ] || { echo "::error::no $archive"; exit 1; }
           done

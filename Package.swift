@@ -120,15 +120,15 @@ func appleBinary(_ name: String, _ xcframework: String) -> Target {
 func prebuiltLibrariesArchive() -> String {
     switch platformTarget {
     case .wasi:
-        return "nucleantthorvg-wasm32.artifactbundle.zip"
+        return "thorvg-wasm32.artifactbundle.zip"
     case .android:
-        return "nucleantthorvg-android-\(androidABI()).artifactbundle.zip"
+        return "thorvg-android-\(androidABI()).artifactbundle.zip"
     default:
         // Linux builds are native, so the host's architecture is the target's.
 #if arch(arm64)
-        return "nucleantthorvg-linux-aarch64.artifactbundle.zip"
+        return "thorvg-linux-aarch64.artifactbundle.zip"
 #else
-        return "nucleantthorvg-linux-x86_64.artifactbundle.zip"
+        return "thorvg-linux-x86_64.artifactbundle.zip"
 #endif
     }
 }
@@ -138,10 +138,10 @@ func prebuiltLibrariesArchive() -> String {
 /// target gives the library and CThorVG keeps only its header.
 func prebuiltThorTargets() -> [Target] {
     return [
-        prebuiltBinary("ThorVGLibraries", prebuiltLibrariesArchive()),
+        prebuiltBinary("thorvg", prebuiltLibrariesArchive()),
         .target(
             name: "CThorVG",
-            dependencies: ["ThorVGLibraries"],
+            dependencies: ["thorvg"],
             path: "Sources/CThorVG",
             publicHeadersPath: "include",
             cSettings: [

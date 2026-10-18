@@ -3,9 +3,9 @@
 # one machine per platform (Linux: per architecture):
 #
 #   apple    ThorVG, ThorVG_lib, libomp  (.xcframework.zip each)
-#   linux    nucleantthorvg-linux-<x86_64|aarch64>.artifactbundle.zip   libthorvg-1.so
-#   android  nucleantthorvg-android-<abi>.artifactbundle.zip            libthorvg-1.so
-#   wasm     nucleantthorvg-wasm32.artifactbundle.zip                   libthorvg-1.a
+#   linux    thorvg-linux-<x86_64|aarch64>.artifactbundle.zip   libthorvg-1.so
+#   android  thorvg-android-<abi>.artifactbundle.zip            libthorvg-1.so
+#   wasm     thorvg-wasm32.artifactbundle.zip                   libthorvg-1.a
 #
 # ThorVG's wg engine links wgpu-native: each machine takes it from
 # NucleantVulkan's release (VULKAN_VERSION, the one Package.swift depends
@@ -130,11 +130,11 @@ jobs:
       - name: wgpu-native from NucleantVulkan ${{ env.VULKAN_VERSION }}
         run: |
           git clone --depth 1 --branch "$VULKAN_VERSION" https://github.com/NucleantUI/NucleantVulkan ../NucleantVulkan
-          curl -fsSL -o wgpu.zip "https://github.com/NucleantUI/NucleantVulkan/releases/download/$VULKAN_VERSION/nucleantvulkan-linux-${{ matrix.arch }}.artifactbundle.zip"
+          curl -fsSL -o wgpu.zip "https://github.com/NucleantUI/NucleantVulkan/releases/download/$VULKAN_VERSION/wgpu_native-linux-${{ matrix.arch }}.artifactbundle.zip"
           unzip -q wgpu.zip -d wgpu
           linux=../NucleantVulkan/Dependencies/linux
           mkdir -p $linux/lib $linux/include
-          cp wgpu/Libraries.artifactbundle/lib/libwgpu_native.so $linux/lib/
+          cp wgpu/wgpu_native-linux-${{ matrix.arch }}.artifactbundle/lib/libwgpu_native.so $linux/lib/
           cp ../NucleantVulkan/Sources/CWgpuLinux/include/webgpu.h ../NucleantVulkan/Sources/CWgpuLinux/include/wgpu.h $linux/include/
           rm -r wgpu wgpu.zip
       - name: ThorVG ${{ matrix.arch }}
@@ -146,7 +146,7 @@ jobs:
         run: >
           python3 scripts/make_artifactbundle.py --triple ${{ matrix.arch }}-unknown-linux-gnu
           --library Dependencies/linux/lib/libthorvg-1.so
-          --name nucleantthorvg-linux-${{ matrix.arch }} --output dist --version "$VERSION"
+          --name thorvg-linux-${{ matrix.arch }} --output dist --version "$VERSION"
       - uses: actions/upload-artifact@v7
         with:
           name: thorvg-linux-${{ matrix.arch }}
@@ -182,10 +182,10 @@ jobs:
           mkdir -p $android/include
           cp ../NucleantVulkan/Sources/CWgpuLinux/include/webgpu.h ../NucleantVulkan/Sources/CWgpuLinux/include/wgpu.h $android/include/
           for abi in arm64-v8a x86_64; do
-            curl -fsSL -o wgpu.zip "https://github.com/NucleantUI/NucleantVulkan/releases/download/$VULKAN_VERSION/nucleantvulkan-android-$abi.artifactbundle.zip"
+            curl -fsSL -o wgpu.zip "https://github.com/NucleantUI/NucleantVulkan/releases/download/$VULKAN_VERSION/wgpu_native-android-$abi.artifactbundle.zip"
             unzip -q wgpu.zip -d wgpu
             mkdir -p $android/$abi/lib
-            cp wgpu/Libraries.artifactbundle/lib/libwgpu_native.so $android/$abi/lib/
+            cp wgpu/wgpu_native-android-$abi.artifactbundle/lib/libwgpu_native.so $android/$abi/lib/
             rm -r wgpu wgpu.zip
           done
       - name: ThorVG arm64-v8a + x86_64
@@ -196,12 +196,12 @@ jobs:
         run: >
           python3 scripts/make_artifactbundle.py --triple aarch64-unknown-linux-android28
           --library Dependencies/android/arm64-v8a/lib/libthorvg-1.so
-          --name nucleantthorvg-android-arm64-v8a --output dist --version "$VERSION"
+          --name thorvg-android-arm64-v8a --output dist --version "$VERSION"
       - name: Package x86_64
         run: >
           python3 scripts/make_artifactbundle.py --triple x86_64-unknown-linux-android28
           --library Dependencies/android/x86_64/lib/libthorvg-1.so
-          --name nucleantthorvg-android-x86_64 --output dist --version "$VERSION"
+          --name thorvg-android-x86_64 --output dist --version "$VERSION"
       - uses: actions/upload-artifact@v7
         with:
           name: thorvg-android
@@ -270,7 +270,7 @@ jobs:
         run: >
           python scripts/make_artifactbundle.py --triple wasm32-unknown-wasip1
           --library Dependencies/wasm/lib/libthorvg-1.a
-          --name nucleantthorvg-wasm32 --output dist --version "$VERSION" --ar "$TOOLCHAIN_BIN/llvm-ar"
+          --name thorvg-wasm32 --output dist --version "$VERSION" --ar "$TOOLCHAIN_BIN/llvm-ar"
       - uses: actions/upload-artifact@v7
         with:
           name: thorvg-wasm32
