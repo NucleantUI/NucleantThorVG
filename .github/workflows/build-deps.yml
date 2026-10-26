@@ -212,9 +212,10 @@ jobs:
     needs: windows
     # A fresh machine with nothing but Swift: the bundle and NucleantVulkan's
     # release have to build and run the tests. It has no GPU, so Mesa's
-    # software Vulkan driver (lavapipe) is the one the loader finds — for
-    # ThorVG drawing through wgpu into a texture the engine imports
-    # (Tests/NucleantThorVGTests/ThorWin32Tests.swift).
+    # software Vulkan driver (lavapipe) is the one the loader finds. That one
+    # cannot export memory as an NT handle (VK_KHR_external_memory_win32),
+    # which ThorVG drawing through wgpu into a texture the engine imports
+    # needs, so ThorWin32Tests skips itself here; it runs on a real GPU.
     runs-on: windows-2025
     timeout-minutes: 60
     steps:

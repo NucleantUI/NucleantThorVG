@@ -8,9 +8,10 @@
 //  — so what ThorVG drew is read back through the engine with no copy in
 //  between. The engine runs on a Win32 window, as an app's does.
 //
-//  Needs a Vulkan driver with VK_KHR_external_memory_win32. CI's Windows
-//  machines have no GPU, so the workflow registers Mesa's software one
-//  (lavapipe); on a desktop it is the machine's own.
+//  Needs a Vulkan driver with VK_KHR_external_memory_win32: a GPU's own
+//  driver has it. CI's Windows machines have no GPU, and Mesa's software
+//  driver (lavapipe) the workflow registers there has no NT-handle export,
+//  so on those the suite is skipped rather than failed.
 //
 #if os(Windows)
 import Testing
@@ -22,7 +23,10 @@ import NucleantVulkan
 
 /// On the main actor, the thread that owns the window, as in an app.
 @MainActor
-@Suite(.serialized)
+@Suite(
+    .serialized,
+    .enabled(if: Win32Driver.exportsMemory, "no Vulkan driver here exports memory as an NT handle (VK_KHR_external_memory_win32)")
+)
 struct ThorWin32Tests {
 
     let window: TestWindow
@@ -110,6 +114,44 @@ struct ThorWin32Tests {
         // The slot frees the node (and its target) on removal.
         engine.remove(id: 1)
     }
+}
+
+/// Whether a Vulkan driver here has VK_KHR_external_memory_win32, which the
+/// wg engine's target needs: wgpu-native's device exports the texture's
+/// memory as an NT handle and the engine's device imports it. Asked of every
+/// device the loader finds, before any engine exists.
+enum Win32Driver {
+    static let exportsMemory: Bool = {
+        var appInfo = VkApplicationInfo()
+        appInfo.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO
+        appInfo.apiVersion = (1 << 22) | (2 << 12) // Vulkan 1.2
+        var created: VkInstance?
+        let result = withUnsafePointer(to: &appInfo) { app in
+            var info = VkInstanceCreateInfo()
+            info.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO
+            info.pApplicationInfo = app
+            return vkCreateInstance(&info, nil, &created)
+        }
+        guard result == VK_SUCCESS, let instance = created else { return false }
+        defer { vkDestroyInstance(instance, nil) }
+
+        var deviceCount: UInt32 = 0
+        vkEnumeratePhysicalDevices(instance, &deviceCount, nil)
+        var devices = [VkPhysicalDevice?](repeating: nil, count: Int(deviceCount))
+        vkEnumeratePhysicalDevices(instance, &deviceCount, &devices)
+        return devices.compactMap { $0 }.contains { device in
+            var count: UInt32 = 0
+            vkEnumerateDeviceExtensionProperties(device, nil, &count, nil)
+            var extensions = [VkExtensionProperties](repeating: VkExtensionProperties(), count: Int(count))
+            vkEnumerateDeviceExtensionProperties(device, nil, &count, &extensions)
+            return extensions.contains { properties in
+                var name = properties.extensionName
+                return withUnsafeBytes(of: &name) { raw in
+                    String(cString: raw.bindMemory(to: CChar.self).baseAddress!)
+                } == "VK_KHR_external_memory_win32"
+            }
+        }
+    }()
 }
 
 /// A top-level window of the system STATIC class (nothing to register), never
