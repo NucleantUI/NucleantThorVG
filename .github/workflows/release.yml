@@ -21,8 +21,8 @@
 #                checked;
 #   4. verify    a new package that depends on the release by its version and
 #                builds and runs against it on Linux, in Swift's image with
-#                nothing installed: the URLs, checksums and manifest as a
-#                consumer gets them.
+#                nothing installed, and on Windows: the URLs, checksums and
+#                manifest as a consumer gets them.
 #
 # The tag and master are pushed with GITHUB_TOKEN, so they start no workflow.
 
@@ -89,6 +89,7 @@ jobs:
           for archive in \
             ThorVG.xcframework.zip ThorVG_lib.xcframework.zip libomp.xcframework.zip \
             thorvg-linux-x86_64.artifactbundle.zip thorvg-linux-aarch64.artifactbundle.zip \
+            thorvg-windows-x86_64.artifactbundle.zip \
             thorvg-android-arm64-v8a.artifactbundle.zip thorvg-android-x86_64.artifactbundle.zip \
             thorvg-wasm32.artifactbundle.zip
           do
@@ -200,4 +201,50 @@ jobs:
           print("NucleantThorVG resolved and linked")
           EOF
           swift build
+          swift run Consumer
+
+  # The same on Windows, where the archive is a DLL artifact bundle: SwiftPM
+  # downloads and checksums it and copies thorvg-1.dll next to the product,
+  # beside NucleantVulkan's wgpu_native.dll. Windows' manifest only evaluates
+  # on Windows, so an archive left on Artifacts/ there shows here and nowhere
+  # else.
+  verify-windows:
+    needs: release
+    runs-on: windows-2025
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: compnerd/gha-setup-swift@v0.5.1
+        with:
+          swift-version: swift-6.3.3-release
+          swift-build: 6.3.3-RELEASE
+      - name: Build a package that depends on the release
+        run: |
+          mkdir -p consumer/Sources/Consumer && cd consumer
+          cat > Package.swift <<EOF
+          // swift-tools-version: 6.2
+          import PackageDescription
+
+          let package = Package(
+              name: "Consumer",
+              platforms: [.macOS(.v14)],
+              dependencies: [
+                  .package(url: "https://github.com/$GITHUB_REPOSITORY", exact: "$TAG"),
+              ],
+              targets: [
+                  .executableTarget(name: "Consumer", dependencies: [
+                      .product(name: "NucleantThorVG", package: "NucleantThorVG"),
+                  ]),
+              ]
+          )
+          EOF
+          cat > Sources/Consumer/main.swift <<'EOF'
+          import NucleantThorVG
+
+          print("NucleantThorVG resolved and linked")
+          EOF
+          swift build
+          # The release's DLLs, copied next to the product
+          ls "$(swift build --show-bin-path)"/*.dll
           swift run Consumer

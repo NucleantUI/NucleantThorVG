@@ -4,6 +4,8 @@
 #
 #   apple    ThorVG, ThorVG_lib, libomp  (.xcframework.zip each)
 #   linux    thorvg-linux-<x86_64|aarch64>.artifactbundle.zip   libthorvg-1.so
+#   windows  thorvg-windows-x86_64.artifactbundle.zip           thorvg-1.dll
+#                                                               + import library
 #   android  thorvg-android-<abi>.artifactbundle.zip            libthorvg-1.so
 #   wasm     thorvg-wasm32.artifactbundle.zip                   libthorvg-1.a
 #
@@ -25,7 +27,7 @@ on:
       platform:
         description: Platform to build (all, or one to retry)
         type: choice
-        options: [all, apple, linux, android, wasm]
+        options: [all, apple, linux, windows, android, wasm]
         default: all
   workflow_call:
     inputs:
@@ -38,7 +40,7 @@ env:
   SWIFT_VERSION: 6.3.3
   VERSION: ${{ inputs.version || '0.0.0' }}
   # The NucleantVulkan release whose wgpu-native ThorVG is built against.
-  VULKAN_VERSION: 0.0.1
+  VULKAN_VERSION: 0.0.2
   # NucleantVulkan from GitHub, by version: the sibling checkout below only
   # holds wgpu-native for the build.
   NUCLEANT_LOCAL_DEV: "0"
@@ -155,6 +157,86 @@ jobs:
         run: |
           mkdir -p Artifacts && cp dist/*.zip Artifacts/
           swift test
+
+  windows:
+    name: windows (x86_64)
+    # Native, with MSVC: meson --vsenv finds it. x86_64 only, for now. Bash,
+    # for the patch thorvg-cython applies to ThorVG's source.
+    if: inputs.platform == '' || inputs.platform == 'all' || inputs.platform == 'windows'
+    runs-on: windows-2025
+    timeout-minutes: 120
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+      # Python 3.13 and the build tools through uv; pkgconf because ThorVG's
+      # wg engine finds wgpu-native through pkg-config.
+      - uses: astral-sh/setup-uv@v8
+      - name: Python 3.13, meson, ninja, pkgconf
+        run: |
+          uv python install 3.13 --default --preview-features python-install-default
+          for tool in meson ninja pkgconf; do uv tool install "$tool"; done
+          uv python dir --bin >> "$GITHUB_PATH"
+          uv tool dir --bin >> "$GITHUB_PATH"
+      - name: wgpu-native from NucleantVulkan ${{ env.VULKAN_VERSION }}
+        run: |
+          git clone --depth 1 --branch "$VULKAN_VERSION" https://github.com/NucleantUI/NucleantVulkan ../NucleantVulkan
+          curl -fsSL -o wgpu.zip "https://github.com/NucleantUI/NucleantVulkan/releases/download/$VULKAN_VERSION/wgpu_native-windows-x86_64.artifactbundle.zip"
+          7z x -owgpu wgpu.zip > /dev/null
+          bundle=wgpu/wgpu_native-windows-x86_64.artifactbundle
+          windows=../NucleantVulkan/Dependencies/windows
+          mkdir -p $windows/lib $windows/bin $windows/include
+          cp $bundle/lib/wgpu_native.lib $windows/lib/
+          cp $bundle/bin/wgpu_native.dll $windows/bin/
+          cp ../NucleantVulkan/Sources/CWgpuLinux/include/webgpu.h ../NucleantVulkan/Sources/CWgpuLinux/include/wgpu.h $windows/include/
+          rm -r wgpu wgpu.zip
+      - name: ThorVG x86_64
+        run: python scripts/build_thorvg.py windows
+      - name: Package x86_64
+        run: >
+          python scripts/make_artifactbundle.py --triple x86_64-unknown-windows-msvc
+          --library Dependencies/windows/lib/thorvg-1.lib --dll Dependencies/windows/bin/thorvg-1.dll
+          --name thorvg-windows-x86_64 --output dist --version "$VERSION"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: thorvg-windows-x86_64
+          path: dist/*.zip
+
+  windows-test:
+    name: windows test (x86_64)
+    needs: windows
+    # A fresh machine with nothing but Swift: the bundle and NucleantVulkan's
+    # release have to build and run the tests. It has no GPU, so Mesa's
+    # software Vulkan driver (lavapipe) is the one the loader finds — for
+    # ThorVG drawing through wgpu into a texture the engine imports
+    # (Tests/NucleantThorVGTests/ThorWin32Tests.swift).
+    runs-on: windows-2025
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with:
+          name: thorvg-windows-x86_64
+          path: Artifacts
+      - uses: compnerd/gha-setup-swift@v0.5.1
+        with:
+          swift-version: swift-${{ env.SWIFT_VERSION }}-release
+          swift-build: ${{ env.SWIFT_VERSION }}-RELEASE
+      - name: lavapipe
+        run: |
+          $version = "26.2.4"
+          curl.exe -fsSL -o mesa.7z "https://github.com/pal1000/mesa-dist-win/releases/download/$version/mesa3d-$version-release-msvc.7z"
+          7z x mesa.7z -omesa x64/vulkan_lvp.dll x64/lvp_icd.x86_64.json -r | Out-Null
+          $icd = (Resolve-Path mesa/x64/lvp_icd.x86_64.json).Path
+          Get-Content $icd
+          # Registered the way an installed driver is: the loader ignores
+          # VK_DRIVER_FILES in an elevated process, which the runner's are.
+          $drivers = "HKLM:\SOFTWARE\Khronos\Vulkan\Drivers"
+          New-Item -Path $drivers -Force | Out-Null
+          New-ItemProperty -Path $drivers -Name $icd -PropertyType DWord -Value 0 -Force | Out-Null
+      - name: Test against it, x86_64
+        run: swift test
 
   android:
     # Both ABIs on one machine — thorvg-cython builds them in one go — in

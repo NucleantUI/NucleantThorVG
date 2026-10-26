@@ -161,8 +161,12 @@ extension ThorShaderNode {
         // and — when this canvas is another node's texture input — a compute
         // dispatch later in the same command buffer. Both stages, so the
         // transition is ordered against whichever consumer comes first.
-        let readerStages = VkPipelineStageFlags(VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT.rawValue)
-            | VkPipelineStageFlags(VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT.rawValue)
+        // Combined from the bits' own raw values, whose type is the platform's
+        // (UInt32, but Int32 on Windows, where C enums are int).
+        let readerStages = VkPipelineStageFlagBits(
+            rawValue: VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT.rawValue
+                | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT.rawValue
+        )
 
         if let pipeline = computePipeline,
            let layout   = computeLayout,
@@ -190,7 +194,7 @@ extension ThorShaderNode {
                 srcStage:  VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
                 dstLayout: VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
                 dstAccess: VkAccessFlags(VK_ACCESS_SHADER_READ_BIT.rawValue),
-                dstStage:  VkPipelineStageFlagBits(rawValue: readerStages)
+                dstStage:  readerStages
             )
         } else {
             engineImageBarrier(
@@ -201,7 +205,7 @@ extension ThorShaderNode {
                 srcStage:  VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
                 dstLayout: VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
                 dstAccess: VkAccessFlags(VK_ACCESS_SHADER_READ_BIT.rawValue),
-                dstStage:  VkPipelineStageFlagBits(rawValue: readerStages)
+                dstStage:  readerStages
             )
         }
         currentLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL

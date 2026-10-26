@@ -363,10 +363,13 @@ private func supportsLinearBgraStorage(_ physicalDevice: VkPhysicalDevice) -> Bo
     vkGetPhysicalDeviceFormatProperties(physicalDevice, VK_FORMAT_B8G8R8A8_UNORM, &props)
     return (props.linearTilingFeatures & VkFormatFeatureFlags(VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT.rawValue)) != 0
 }
-#elseif os(Linux) || os(Android)
+#elseif os(Linux) || os(Android) || os(Windows)
 import NucleantVulkan
 import CVulkan
 import CThorVG
+#if os(Windows)
+import WinSDK
+#endif
 
 extension VulkanRenderEngine {
 
@@ -374,6 +377,8 @@ extension VulkanRenderEngine {
     /// above: a wgpu texture, a `Tvg_Canvas` targeting it, and a
     /// `ThorShaderNode` importing that texture's memory as a VkImage — zero
     /// copy, via `VK_KHR_external_memory_fd` instead of `VK_EXT_metal_objects`.
+    /// Windows is the same with an NT handle (`VK_KHR_external_memory_win32`)
+    /// in place of the fd.
     /// Android shares this path by default rather than importing an
     /// AHardwareBuffer: both go through wgpu's Vulkan backend, so both export
     /// the same fd. The AHardwareBuffer path exists as an opt-in build only
@@ -399,6 +404,13 @@ extension VulkanRenderEngine {
         guard let hardwareBuffer = target.nativeAndroidHardwareBuffer() else {
             print("VulkanRenderEngine: wgpu target has no AHardwareBuffer — device may lack "
                   + "VK_ANDROID_external_memory_android_hardware_buffer")
+            target.release()
+            return nil
+        }
+        #elseif os(Windows)
+        guard let handle = target.nativeVulkanExportedWin32Handle() else {
+            print("VulkanRenderEngine: wgpu target has no exported handle — driver may lack "
+                  + "VK_KHR_external_memory_win32")
             target.release()
             return nil
         }
@@ -434,6 +446,13 @@ extension VulkanRenderEngine {
         let built = try? makeThorNode(
             canvas: canvas,
             importingHardwareBuffer: hardwareBuffer,
+            width: width,
+            height: height
+        )
+        #elseif os(Windows)
+        let built = try? makeThorNode(
+            canvas: canvas,
+            importingWin32Handle: handle,
             width: width,
             height: height
         )
@@ -609,6 +628,140 @@ extension VulkanRenderEngine {
     }
     #endif
 
+    #if os(Windows)
+    /// The Windows `makeImportedImage(fd:)`: the VkImage + view + memory
+    /// imported from an NT handle exported via `VK_KHR_external_memory_win32`.
+    /// Everything but the handle type and its import struct is the fd path's.
+    ///
+    /// Unlike an fd, the handle is not consumed by the import (Vulkan spec: an
+    /// NT handle stays the application's), so it is closed here once the
+    /// import is done, whether it succeeded or not — the driver keeps its own
+    /// reference to the memory.
+    func makeImportedImage(
+        win32Handle handle: HANDLE,
+        width:  Int,
+        height: Int
+    ) throws -> (image: VkImage, view: VkImageView, memory: VkDeviceMemory?) {
+        defer { CloseHandle(handle) }
+
+        var externalMemoryInfo = VkExternalMemoryImageCreateInfo()
+        externalMemoryInfo.sType = VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO
+        externalMemoryInfo.handleTypes = VkExternalMemoryHandleTypeFlags(
+            VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_WIN32_BIT.rawValue
+        )
+
+        var image: VkImage?
+        let imageResult: VkResult = withUnsafePointer(to: &externalMemoryInfo) { extPtr in
+            var imageInfo = VkImageCreateInfo()
+            imageInfo.sType         = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO
+            imageInfo.pNext         = UnsafeRawPointer(extPtr)
+            imageInfo.imageType     = VK_IMAGE_TYPE_2D
+            imageInfo.format        = importedTextureFormat
+            imageInfo.extent        = VkExtent3D(width: UInt32(width), height: UInt32(height), depth: 1)
+            imageInfo.mipLevels     = 1
+            imageInfo.arrayLayers   = 1
+            imageInfo.samples       = VK_SAMPLE_COUNT_1_BIT
+            imageInfo.tiling        = VK_IMAGE_TILING_OPTIMAL
+            imageInfo.usage         = VkImageUsageFlags(
+                VK_IMAGE_USAGE_SAMPLED_BIT.rawValue |
+                VK_IMAGE_USAGE_TRANSFER_SRC_BIT.rawValue |
+                VK_IMAGE_USAGE_TRANSFER_DST_BIT.rawValue
+            )
+            imageInfo.sharingMode   = VK_SHARING_MODE_EXCLUSIVE
+            imageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED
+            return vkCreateImage(device, &imageInfo, nil, &image)
+        }
+        guard imageResult == VK_SUCCESS, let image else {
+            throw VulkanEngineError.image
+        }
+
+        var requirements = VkMemoryRequirements()
+        vkGetImageMemoryRequirements(device, image, &requirements)
+
+        let dedicatedInfo = UnsafeMutablePointer<VkMemoryDedicatedAllocateInfo>.allocate(capacity: 1)
+        defer { dedicatedInfo.deallocate() }
+        dedicatedInfo.pointee = VkMemoryDedicatedAllocateInfo()
+        dedicatedInfo.pointee.sType = VK_STRUCTURE_TYPE_MEMORY_DEDICATED_ALLOCATE_INFO
+        dedicatedInfo.pointee.image = image
+
+        let importInfo = UnsafeMutablePointer<VkImportMemoryWin32HandleInfoKHR>.allocate(capacity: 1)
+        defer { importInfo.deallocate() }
+        importInfo.pointee = VkImportMemoryWin32HandleInfoKHR()
+        importInfo.pointee.sType = VK_STRUCTURE_TYPE_IMPORT_MEMORY_WIN32_HANDLE_INFO_KHR
+        importInfo.pointee.pNext = UnsafeRawPointer(dedicatedInfo)
+        importInfo.pointee.handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_WIN32_BIT
+        importInfo.pointee.handle = handle
+
+        var memory: VkDeviceMemory?
+        var allocInfo = VkMemoryAllocateInfo()
+        allocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO
+        allocInfo.pNext = UnsafeRawPointer(importInfo)
+        allocInfo.allocationSize = requirements.size
+        allocInfo.memoryTypeIndex = findMemoryType(
+            typeFilter: requirements.memoryTypeBits,
+            properties: VkMemoryPropertyFlags(VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT.rawValue)
+        )
+        guard vkAllocateMemory(device, &allocInfo, nil, &memory) == VK_SUCCESS, let memory else {
+            vkDestroyImage(device, image, nil)
+            throw VulkanEngineError.memory
+        }
+        vkBindImageMemory(device, image, memory, 0)
+
+        var view: VkImageView?
+        var viewInfo = VkImageViewCreateInfo()
+        viewInfo.sType    = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO
+        viewInfo.image    = image
+        viewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D
+        viewInfo.format   = compositeSampleFormat
+        viewInfo.subresourceRange = VkImageSubresourceRange(
+            aspectMask:     VkImageAspectFlags(VK_IMAGE_ASPECT_COLOR_BIT.rawValue),
+            baseMipLevel:   0, levelCount: 1,
+            baseArrayLayer: 0, layerCount: 1
+        )
+        guard vkCreateImageView(device, &viewInfo, nil, &view) == VK_SUCCESS, let view else {
+            vkFreeMemory(device, memory, nil)
+            vkDestroyImage(device, image, nil)
+            throw VulkanEngineError.image
+        }
+
+        // As the fd path: GENERAL, never UNDEFINED, so the driver may not
+        // discard what wgpu writes.
+        oneTimeSubmit { cmd in
+            engineImageBarrier(
+                cmd,
+                image:     image,
+                srcLayout: VK_IMAGE_LAYOUT_UNDEFINED,
+                srcAccess: 0,
+                srcStage:  VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                dstLayout: VK_IMAGE_LAYOUT_GENERAL,
+                dstAccess: VkAccessFlags(VK_ACCESS_MEMORY_WRITE_BIT.rawValue) | VkAccessFlags(VK_ACCESS_MEMORY_READ_BIT.rawValue),
+                dstStage:  VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT
+            )
+        }
+
+        return (image, view, memory)
+    }
+
+    /// The Windows `makeThorNode(importingFd:)`.
+    func makeThorNode(
+        canvas:       Tvg_Canvas,
+        importingWin32Handle handle: HANDLE,
+        width:        Int,
+        height:       Int
+    ) throws -> ThorShaderNode<RenderNode> {
+        let created = try makeImportedImage(win32Handle: handle, width: width, height: height)
+        return ThorShaderNode(
+            canvas:             ThorVulkanCanvas(base: canvas),
+            width:              UInt32(width),
+            height:             UInt32(height),
+            image:              created.image,
+            imageView:          created.view,
+            memory:             created.memory,
+            isExternallyBacked: true,
+            storageCapable:     false
+        )
+    }
+    #else
     /// Just the imported VkImage + view + memory from a POSIX fd exported via
     /// `VK_KHR_external_memory_fd` — the Linux mirror of
     /// `makeImportedImage(mtlTexture:)`. Unlike the Metal struct,
@@ -771,6 +924,7 @@ extension VulkanRenderEngine {
             storageCapable:     false
         )
     }
+    #endif
 
     /// Linux/Android mirror of `resizeThorNode` above: mint a new wgpu target +
     /// imported VkImage at the new size via the fd-import path instead of
@@ -802,6 +956,12 @@ extension VulkanRenderEngine {
             target.release()
             return false
         }
+        #elseif os(Windows)
+        guard let handle = target.nativeVulkanExportedWin32Handle() else {
+            print("VulkanRenderEngine: wgpu target has no exported handle (resize)")
+            target.release()
+            return false
+        }
         #else
         guard let fd = target.nativeVulkanExportedFd() else {
             print("VulkanRenderEngine: wgpu target has no exported fd (resize)")
@@ -816,6 +976,8 @@ extension VulkanRenderEngine {
             created = try makeImportedImage(
                 hardwareBuffer: hardwareBuffer, width: width, height: height
             )
+            #elseif os(Windows)
+            created = try makeImportedImage(win32Handle: handle, width: width, height: height)
             #else
             created = try makeImportedImage(fd: fd, width: width, height: height)
             #endif
