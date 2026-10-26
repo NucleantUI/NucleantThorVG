@@ -20,7 +20,10 @@ After a macOS/iOS/linux/windows build this script also repackages the built
 binary into Dependencies/apple/, Dependencies/linux/ or Dependencies/windows/
 so downstream builds pick up the new symbols.
 
-Windows builds natively with MSVC (meson --vsenv), x64:
+Windows builds natively with MSVC (meson --vsenv), x64, always with the `wg`
+engine. thorvg-cython has no Windows `wg` build, so this script runs meson
+itself, as for Android's later ABIs: thorvg-cython's source download, patches
+and meson arguments, not its build_windows().
 
     python scripts/build_thorvg.py windows
 
@@ -33,9 +36,9 @@ Platforms
 
 GPU
     --gpu=vulkan    Vulkan backend (linux, macos, ios, android, windows)
-    --gpu=gl        OpenGL         (linux, windows, android)
+    --gpu=gl        OpenGL         (linux, android)
     --gpu=gles      OpenGL ES      (android)
-    --gpu=angle     ANGLE          (macos, ios, windows, android)
+    --gpu=angle     ANGLE          (macos, ios, android)
 
 ThorVG source
     --thorvg-version=<x.y.z>   Auto-download this release if source is missing
@@ -458,7 +461,7 @@ def _build_android_abi(abi: str, arch_name: str, gpu: str) -> None:
     print(f"\n[sulphur] Building {arch_name} ({abi}) against staged wgpu ...")
     subprocess.run(
         ["meson", "setup", str(build_dir), "--cross-file", str(cross_file)]
-        + _thorvg_meson_args(gpu),
+        + _thorvg_meson_args("android", gpu),
         cwd=str(THORVG_ROOT), env=env, check=True,
     )
     subprocess.run(["ninja", "-C", str(build_dir)],
@@ -471,14 +474,57 @@ def _build_android_abi(abi: str, arch_name: str, gpu: str) -> None:
     print(f"[sulphur]   {arch_name}: {out_dir / 'libthorvg-1.so'}")
 
 
-def _thorvg_meson_args(gpu: str) -> list[str]:
-    """Reuse thorvg-cython's own meson arguments rather than restating them."""
+def _thorvg_build_module():
+    """thorvg-cython's build_thorvg.py, loaded as a module."""
     import importlib.util
     spec = importlib.util.spec_from_file_location(
         "_tvg_build", str(THORVG_BUILD_SCRIPT))
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
-    return mod._meson_common("android", gpu)
+    return mod
+
+
+def _thorvg_meson_args(platform: str, gpu: str) -> list[str]:
+    """Reuse thorvg-cython's own meson arguments rather than restating them."""
+    return _thorvg_build_module()._meson_common(platform, gpu)
+
+
+def _build_windows(env: dict[str, str], version: str) -> None:
+    """Build thorvg-1.dll with the wg engine, x64, with MSVC.
+
+    thorvg-cython's build_windows() offers no `wg` engine, so, as for
+    Android's later ABIs, meson runs here — on thorvg-cython's ThorVG source,
+    patches and meson arguments, so the two paths cannot drift.
+    """
+    tools = _thorvg_build_module()
+    tools._download_thorvg_source(version, THORVG_ROOT)
+    tools._apply_patches(THORVG_ROOT, "vulkan")
+
+    # Strawberry Perl's ccache intercepts cl.exe (GitHub's Windows machines
+    # have it on PATH), as thorvg-cython's build_windows() also handles.
+    env = dict(env)
+    env["PATH"] = os.pathsep.join(
+        entry for entry in env.get("PATH", "").split(os.pathsep)
+        if not entry.lower().startswith(r"c:\strawberry"))
+
+    build_dir = THORVG_ROOT / "build_windows" / "x64"
+    if build_dir.exists():
+        shutil.rmtree(build_dir)
+    # wg's designated initializers are C++20 to MSVC (clang and GCC take them
+    # in ThorVG's C++14 as an extension).
+    meson_args = (["--vsenv"] + tools._meson_common("windows", "vulkan")
+                  + ["-Dcpp_std=c++20"])
+
+    print(f"\n[sulphur] Building windows_x64 against staged wgpu ...")
+    subprocess.run(["meson", "setup", str(build_dir)] + meson_args,
+                   cwd=str(THORVG_ROOT), env=env, check=True)
+    # meson compile, not ninja: it enters the MSVC environment again.
+    subprocess.run(["meson", "compile", "-C", str(build_dir)],
+                   cwd=str(THORVG_ROOT), env=env, check=True)
+
+    THORVG_WINDOWS_OUT_DIR.mkdir(parents=True, exist_ok=True)
+    for name in ("thorvg-1.dll", "thorvg-1.lib"):
+        shutil.copy2(str(build_dir / "src" / name), str(THORVG_WINDOWS_OUT_DIR / name))
 
 
 def _repackage_android() -> None:
@@ -726,8 +772,12 @@ def main() -> None:
         env["PKG_CONFIG"] = shutil.which("pkgconf") or "pkg-config"
         env["PKG_CONFIG_LIBDIR"] = pc_dir
         env["PKG_CONFIG_PATH"] = pc_dir
-        if not any(a.startswith("--gpu") for a in forwarded):
-            forwarded = ["--gpu=vulkan"] + forwarded
+        if forwarded:
+            sys.exit(f"[sulphur] windows builds the wg engine only; "
+                     f"unexpected options: {' '.join(forwarded)}")
+        _build_windows(env, args.thorvg_version or THORVG_VERSION)
+        _repackage_windows()
+        return
 
     cmd = [sys.executable, str(THORVG_BUILD_SCRIPT), args.platform]
     cmd += [f"--version={args.thorvg_version or THORVG_VERSION}"]
@@ -775,8 +825,6 @@ def main() -> None:
         _repackage_linux()
     elif args.platform == "android":
         _repackage_android()
-    elif args.platform == "windows":
-        _repackage_windows()
 
 
 if __name__ == "__main__":
