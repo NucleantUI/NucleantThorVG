@@ -32,6 +32,10 @@ func getPlatformTarget() -> PackageDescription.Platform {
     }
 #if os(Linux)
     return .linux
+#elseif os(Windows)
+    // Native, like Linux: the Windows toolchain builds for the machine it
+    // runs on.
+    return .windows
 #else
     return .macOS
 #endif
@@ -135,16 +139,26 @@ func appleBinary(_ name: String, _ xcframework: String) -> Target {
     return .binaryTarget(name: name, path: "Dependencies/apple/\(xcframework)")
 }
 
-/// ThorVG on Linux, Android and wasm, as one artifact bundle per platform and
-/// architecture (scripts/make_artifactbundle.py). On Linux and Android the
-/// bundle holds libthorvg-1.so itself — SwiftPM copies it next to the product
-/// and links it, beside NucleantVulkan's libwgpu_native.so, which it links.
+/// ThorVG on Linux, Windows, Android and wasm, as one artifact bundle per
+/// platform and architecture (scripts/make_artifactbundle.py). On Linux and
+/// Android the bundle holds libthorvg-1.so itself — SwiftPM copies it next to
+/// the product and links it, beside NucleantVulkan's libwgpu_native.so, which
+/// it links. On Windows it holds thorvg-1.dll's import library, which the
+/// product links, and the DLL, which SwiftPM copies next to it, beside
+/// NucleantVulkan's wgpu_native.dll.
 func prebuiltLibrariesArchive() -> String {
     switch platformTarget {
     case .wasi:
         return "thorvg-wasm32.artifactbundle.zip"
     case .android:
         return "thorvg-android-\(androidABI()).artifactbundle.zip"
+    case .windows:
+        // Native, as on Linux.
+#if arch(arm64)
+        return "thorvg-windows-arm64.artifactbundle.zip"
+#else
+        return "thorvg-windows-x86_64.artifactbundle.zip"
+#endif
     default:
         // Linux builds are native, so the host's architecture is the target's.
 #if arch(arm64)
@@ -183,14 +197,15 @@ func getDepedencies() -> [Package.Dependency] {
     if devMode {
         deps.append(.package(path: "../NucleantVulkan"))
     } else {
-        deps.append(.package(url: "https://github.com/NucleantUI/NucleantVulkan", .upToNextMinor(from: "0.0.1")))
+        // 0.0.2: the first with Windows.
+        deps.append(.package(url: "https://github.com/NucleantUI/NucleantVulkan", .upToNextMinor(from: "0.0.2")))
     }
     //deps.append(.package(path: "../NucleantCore"))
     return deps
 }
 
 func thorTargets() -> [Target] {
-    if prebuiltThorVG && [.wasi, .android, .linux].contains(platformTarget) {
+    if prebuiltThorVG && [.wasi, .android, .linux, .windows].contains(platformTarget) {
         return prebuiltThorTargets()
     }
     if platformTarget == .wasi {

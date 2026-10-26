@@ -7,8 +7,8 @@ then delegates to its build_thorvg.py script.
 
 wgpu-native (the `wg` engine links it) comes from the sibling NucleantVulkan
 checkout on every platform: Dependencies/macos/wgpu_native.xcframework
-(macOS, iOS), Dependencies/linux and Dependencies/android/<abi> — in CI,
-NucleantVulkan's release archives unpacked there.
+(macOS, iOS), Dependencies/linux, Dependencies/android/<abi> and
+Dependencies/windows — in CI, NucleantVulkan's release archives unpacked there.
 
 macOS one architecture at a time (what CI does, a step each):
 
@@ -16,9 +16,13 @@ macOS one architecture at a time (what CI does, a step each):
     python scripts/build_thorvg.py macos --gpu=vulkan --target-arch x86_64
     python scripts/build_thorvg.py macos --repackage-only
 
-After a macOS/iOS/linux build this script also repackages the built binary
-into Dependencies/apple/ or Dependencies/linux/ so downstream builds pick up
-the new symbols.
+After a macOS/iOS/linux/windows build this script also repackages the built
+binary into Dependencies/apple/, Dependencies/linux/ or Dependencies/windows/
+so downstream builds pick up the new symbols.
+
+Windows builds natively with MSVC (meson --vsenv), x64:
+
+    python scripts/build_thorvg.py windows
 
 Usage
 -----
@@ -28,7 +32,7 @@ Platforms
     linux / macos / ios / android / windows
 
 GPU
-    --gpu=vulkan    Vulkan backend (linux, macos, ios, android)
+    --gpu=vulkan    Vulkan backend (linux, macos, ios, android, windows)
     --gpu=gl        OpenGL         (linux, windows, android)
     --gpu=gles      OpenGL ES      (android)
     --gpu=angle     ANGLE          (macos, ios, windows, android)
@@ -117,6 +121,13 @@ ANDROID_PRIMARY_ARCH = "android_aarch64"
 # NucleantVulkan/scripts/build_wgpu.py --android. ThorVG's `wg` engine links
 # the same .so this engine does, so both land on one loaded instance.
 WGPU_ANDROID_DIR = DEV_ROOT / "NucleantVulkan" / "Dependencies" / "android"
+
+# Windows: build_thorvg.py emits thorvg-1.dll and its import library here;
+# NucleantThorVG vendors them as Dependencies/windows/{bin,lib}, the layout
+# NucleantVulkan's Dependencies/windows has (wgpu_native.dll, .lib, include/).
+THORVG_WINDOWS_OUT_DIR = THORVG_ROOT / "output" / "windows_x64"
+NUCLEANT_WINDOWS_DIR   = SULPHUR_ROOT / "Dependencies" / "windows"
+WGPU_WINDOWS_DIR       = DEV_ROOT / "NucleantVulkan" / "Dependencies" / "windows"
 
 XCFW_INSTALL_NAME = "@rpath/ThorVG.framework/ThorVG"
 
@@ -331,17 +342,39 @@ def _stage_wgpu_pkgconfig(name: str, stage: Path, include_dir: Path, lib_dir: Pa
         if not src.is_file():
             sys.exit(f"[sulphur] wgpu-native header not found: {src}")
         shutil.copy2(src, inc / header)
+    # Forward slashes, also on Windows: pkg-config reads a backslash as an
+    # escape.
     (pc_dir / f"{name}.pc").write_text(
-        f"libdir={lib_dir}\n"
-        f"includedir={include_dir}\n"
+        f"libdir={lib_dir.as_posix()}\n"
+        f"includedir={include_dir.as_posix()}\n"
         "\n"
         f"Name: {name}\n"
         "Description: wgpu-native (WebGPU) for the ThorVG wg engine\n"
         "Version: 29.0.1.1\n"
-        f"Cflags: -I{stage / 'include'}\n"
+        f"Cflags: -I{(stage / 'include').as_posix()}\n"
         f"Libs: {libs}\n"
     )
     return str(pc_dir)
+
+
+def _repackage_windows() -> None:
+    """Copy the freshly-built DLL and its import library into
+    Dependencies/windows — the Windows _repackage_linux(). Nothing to patch:
+    the DLL names wgpu_native.dll, no path, and Windows looks for it next to
+    the executable, where SwiftPM copies both."""
+    dll = THORVG_WINDOWS_OUT_DIR / "thorvg-1.dll"
+    lib = THORVG_WINDOWS_OUT_DIR / "thorvg-1.lib"
+    for built in (dll, lib):
+        if not built.is_file():
+            sys.exit(f"[sulphur] {built} not found — did the Windows build finish?")
+
+    print(f"\n[sulphur] Repackaging Dependencies/windows ...")
+    for built, sub_dir in ((dll, "bin"), (lib, "lib")):
+        dest = NUCLEANT_WINDOWS_DIR / sub_dir
+        dest.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(str(built), str(dest / built.name))
+        print(f"[sulphur]   {dest / built.name}")
+    print("[sulphur] Repackage done.\n")
 
 
 def _stage_wgpu_android(abi: str) -> str:
@@ -675,6 +708,27 @@ def main() -> None:
         if not any(a.startswith("--gpu") for a in forwarded):
             forwarded = ["--gpu=vulkan"] + forwarded
 
+    elif args.platform == "windows":
+        if not (WGPU_WINDOWS_DIR / "lib" / "wgpu_native.lib").is_file():
+            sys.exit(
+                f"[sulphur] wgpu-native not found in {WGPU_WINDOWS_DIR} — build it first: "
+                "python ../NucleantVulkan/scripts/build_wgpu.py"
+            )
+        # As on Android, the module is `wgpu_native`. Linked through its
+        # import library; the DLL goes next to the executable.
+        lib_dir = WGPU_WINDOWS_DIR / "lib"
+        pc_dir = _stage_wgpu_pkgconfig(
+            "wgpu_native", SCRIPT_DIR / ".work" / "wgpu_stage" / "windows",
+            WGPU_WINDOWS_DIR / "include", lib_dir,
+            f"-L{lib_dir.as_posix()} -lwgpu_native")
+        # pkgconf (pip/uv's), ahead of any other pkg-config on PATH —
+        # GitHub's Windows machines have Strawberry Perl's.
+        env["PKG_CONFIG"] = shutil.which("pkgconf") or "pkg-config"
+        env["PKG_CONFIG_LIBDIR"] = pc_dir
+        env["PKG_CONFIG_PATH"] = pc_dir
+        if not any(a.startswith("--gpu") for a in forwarded):
+            forwarded = ["--gpu=vulkan"] + forwarded
+
     cmd = [sys.executable, str(THORVG_BUILD_SCRIPT), args.platform]
     cmd += [f"--version={args.thorvg_version or THORVG_VERSION}"]
     cmd += forwarded
@@ -721,6 +775,8 @@ def main() -> None:
         _repackage_linux()
     elif args.platform == "android":
         _repackage_android()
+    elif args.platform == "windows":
+        _repackage_windows()
 
 
 if __name__ == "__main__":
