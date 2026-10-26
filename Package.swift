@@ -80,36 +80,40 @@ func androidABI() -> String {
 /// release.
 let releasedThorVG: [String: (url: String, checksum: String)] = [
     "ThorVG.xcframework.zip": (
-        url: "https://github.com/NucleantUI/NucleantThorVG/releases/download/0.0.1/ThorVG.xcframework.zip",
-        checksum: "bb3d9f3a28926907ec6c329b78390103e52a57ee2f57b4a8e492de846d32f700"
+        url: "https://github.com/NucleantUI/NucleantThorVG/releases/download/0.0.2/ThorVG.xcframework.zip",
+        checksum: "a3d131192d11b7e408f14b01a42c139c4d5a8f31260dc2e68357b55f06cc3f72"
     ),
     "ThorVG_lib.xcframework.zip": (
-        url: "https://github.com/NucleantUI/NucleantThorVG/releases/download/0.0.1/ThorVG_lib.xcframework.zip",
-        checksum: "a07bcedf306a3b178182e892bbf662af19d8f94f878c98102a6d098b6d068433"
+        url: "https://github.com/NucleantUI/NucleantThorVG/releases/download/0.0.2/ThorVG_lib.xcframework.zip",
+        checksum: "e19c29d9b7c2c5cb9766faf01c578b890cc88648573ac4fdeae81f70771d46f3"
     ),
     "libomp.xcframework.zip": (
-        url: "https://github.com/NucleantUI/NucleantThorVG/releases/download/0.0.1/libomp.xcframework.zip",
-        checksum: "0f0b341107efe0e41056566327e31d1e745d2b3277f8b495cbb98ea598de55c8"
+        url: "https://github.com/NucleantUI/NucleantThorVG/releases/download/0.0.2/libomp.xcframework.zip",
+        checksum: "71a54dfca2495b3142033220a34cdfe145dd998608eeb49062d4f53397a9ddba"
     ),
     "thorvg-android-arm64-v8a.artifactbundle.zip": (
-        url: "https://github.com/NucleantUI/NucleantThorVG/releases/download/0.0.1/thorvg-android-arm64-v8a.artifactbundle.zip",
-        checksum: "feb899e0a2ba274ea529de8b986c7746d7f43d304755f8baba801ad6bf265197"
+        url: "https://github.com/NucleantUI/NucleantThorVG/releases/download/0.0.2/thorvg-android-arm64-v8a.artifactbundle.zip",
+        checksum: "de94fc263fd4d2966684d9fabb626701eeeeb4a42c832d1edddc2ccdb0d020d1"
     ),
     "thorvg-android-x86_64.artifactbundle.zip": (
-        url: "https://github.com/NucleantUI/NucleantThorVG/releases/download/0.0.1/thorvg-android-x86_64.artifactbundle.zip",
-        checksum: "ebf4cd26669996b4edb816638f7f64e3ee2dac4320b4703153a05679d4c1fdb1"
+        url: "https://github.com/NucleantUI/NucleantThorVG/releases/download/0.0.2/thorvg-android-x86_64.artifactbundle.zip",
+        checksum: "89132481586871d232d5033b90582720a3a90b9d26d5176743ce861e5d9dcc2d"
     ),
     "thorvg-linux-aarch64.artifactbundle.zip": (
-        url: "https://github.com/NucleantUI/NucleantThorVG/releases/download/0.0.1/thorvg-linux-aarch64.artifactbundle.zip",
-        checksum: "37f66aa797175df4a03f8b09b21db7b0de4247cf9129a109377d8a72d6e1c6cc"
+        url: "https://github.com/NucleantUI/NucleantThorVG/releases/download/0.0.2/thorvg-linux-aarch64.artifactbundle.zip",
+        checksum: "8189ef45723e08bfc45578e5dea736fa98badc831716de0b9354086b6cbf9e33"
     ),
     "thorvg-linux-x86_64.artifactbundle.zip": (
-        url: "https://github.com/NucleantUI/NucleantThorVG/releases/download/0.0.1/thorvg-linux-x86_64.artifactbundle.zip",
-        checksum: "7c6ea99709d01e4b8dd313567ee79ee856f44da7e80a5541e7533d12e179c988"
+        url: "https://github.com/NucleantUI/NucleantThorVG/releases/download/0.0.2/thorvg-linux-x86_64.artifactbundle.zip",
+        checksum: "8fa5fe721192a6c3b073772f221d1495f77d1e07e4fbe99a5ad83cf3d4eea628"
     ),
     "thorvg-wasm32.artifactbundle.zip": (
-        url: "https://github.com/NucleantUI/NucleantThorVG/releases/download/0.0.1/thorvg-wasm32.artifactbundle.zip",
-        checksum: "eb000dfeb638a60b65b7ea536874d9c7fcecdd0a40bc3b5a657fb4a22004ff64"
+        url: "https://github.com/NucleantUI/NucleantThorVG/releases/download/0.0.2/thorvg-wasm32.artifactbundle.zip",
+        checksum: "ff5198de11f3b42a1f30c4f53249dc870c01963707296ae82de7908bfc11de77"
+    ),
+    "thorvg-windows-x86_64.artifactbundle.zip": (
+        url: "https://github.com/NucleantUI/NucleantThorVG/releases/download/0.0.2/thorvg-windows-x86_64.artifactbundle.zip",
+        checksum: "c9b2bffff10f9e015fa83706f759b674b150e11fb3454770abb7ffb0e98e0647"
     ),
 ]
 
