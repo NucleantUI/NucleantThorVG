@@ -64,7 +64,7 @@ func readPixels(_ engine: VulkanRenderEngine<ThorSlot>, _ image: VkImage, width:
     defer { vkFreeMemory(engine.device, memory, nil) }
     vkBindBufferMemory(engine.device, buffer, memory, 0)
 
-    engine.oneTimeSubmit { cmd in
+    engine.renderDevice.oneTimeSubmit { cmd in
         var region = VkBufferImageCopy()
         region.imageSubresource = VkImageSubresourceLayers(
             aspectMask: VkImageAspectFlags(VK_IMAGE_ASPECT_COLOR_BIT.rawValue), mipLevel: 0, baseArrayLayer: 0, layerCount: 1)
@@ -127,12 +127,12 @@ final class ThorSlot: RenderContainerNode, @unchecked Sendable {
         if case .thor(let node) = context { observe(node) }
     }
 
-    func update(engine: Engine, cmd: VkCommandBuffer) {
-        if case .thor(let node) = context { node.update(engine, slot: self, cmd: cmd) }
+    func update(device: Device, cmd: VkCommandBuffer) {
+        if case .thor(let node) = context { node.update(device, slot: self, cmd: cmd) }
     }
 
-    func destroyResources(engine: Engine) {
-        if case .thor(let node) = context { node.destroyResources(engine) }
+    func destroyResources(device: Device) {
+        if case .thor(let node) = context { node.destroyResources(device) }
     }
 
     func getImageView() -> VkImageView? {

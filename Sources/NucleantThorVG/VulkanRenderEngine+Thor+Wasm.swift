@@ -16,7 +16,7 @@ import NucleantVulkan
 import CVulkan
 import CThorVG
 
-extension VulkanRenderEngine {
+extension VulkanRenderDevice {
 
     /// A self-contained ThorVG render target: a texture on the page's device,
     /// a `Tvg_Canvas` targeting it, and a `ThorShaderNode` whose VkImage is
@@ -29,15 +29,15 @@ extension VulkanRenderEngine {
         height: Int
     ) -> ThorShaderNode<RenderNode>? {
         guard let wgpu = WgpuContext.shared else {
-            print("VulkanRenderEngine: no WgpuContext — thor node unbuildable")
+            print("VulkanRenderDevice: no WgpuContext — thor node unbuildable")
             return nil
         }
         guard let target = wgpu.makeTarget(width: width, height: height) else {
-            print("VulkanRenderEngine: wgpu target creation failed")
+            print("VulkanRenderDevice: wgpu target creation failed")
             return nil
         }
         guard let canvas = canvasBase ?? tvg_wgcanvas_create(TVG_ENGINE_OPTION_DEFAULT) else {
-            print("VulkanRenderEngine: tvg_wgcanvas_create failed")
+            print("VulkanRenderDevice: tvg_wgcanvas_create failed")
             target.release()
             return nil
         }
@@ -53,7 +53,7 @@ extension VulkanRenderEngine {
             height: height,
             storageCapable: storageCapable
         ) else {
-            print("VulkanRenderEngine: makeThorNode(importingWebGPUTexture:) failed")
+            print("VulkanRenderDevice: makeThorNode(importingWebGPUTexture:) failed")
             target.release()
             return nil
         }
@@ -69,7 +69,7 @@ extension VulkanRenderEngine {
             1
         )
         guard result == TVG_RESULT_SUCCESS else {
-            print("VulkanRenderEngine: tvg_wgcanvas_set_target failed (\(result))")
+            print("VulkanRenderDevice: tvg_wgcanvas_set_target failed (\(result))")
             target.release()
             return nil
         }
@@ -219,11 +219,11 @@ extension VulkanRenderEngine {
         else { return true }
 
         guard let wgpu = WgpuContext.shared else {
-            print("VulkanRenderEngine: no WgpuContext — thor node unresizable")
+            print("VulkanRenderDevice: no WgpuContext — thor node unresizable")
             return false
         }
         guard let target = wgpu.makeTarget(width: width, height: height) else {
-            print("VulkanRenderEngine: wgpu target creation failed (resize)")
+            print("VulkanRenderDevice: wgpu target creation failed (resize)")
             return false
         }
 
@@ -236,7 +236,7 @@ extension VulkanRenderEngine {
                 storageCapable: node.storageCapable
             )
         } catch {
-            print("VulkanRenderEngine: imported image (resize) failed: \(error)")
+            print("VulkanRenderDevice: imported image (resize) failed: \(error)")
             target.release()
             return false
         }
@@ -252,8 +252,9 @@ extension VulkanRenderEngine {
             1
         )
         guard result == TVG_RESULT_SUCCESS else {
-            print("VulkanRenderEngine: tvg_wgcanvas_set_target failed on resize (\(result))")
-            vkDeviceWaitIdle(device)
+            print("VulkanRenderDevice: tvg_wgcanvas_set_target failed on resize (\(result))")
+            // Nothing has used the new image but its layout barrier, which
+            // `makeImportedImage` already waited for.
             vkDestroyImageView(device, created.view, nil)
             vkDestroyImage(device, created.image, nil)
             if let m = created.memory { vkFreeMemory(device, m, nil) }
@@ -276,16 +277,17 @@ extension VulkanRenderEngine {
         node.releaseExternal           = { target.release() }
         node.dirty                     = true
 
-        // Freed once the frames that may still sample the old image are done.
+        // Freed once the work that may still sample the old image is done.
         let device = device
-        releaseAfterInFlightFrames {
+        releaseAfterInFlightWork {
             vkDestroyImageView(device, oldView, nil)
             vkDestroyImage(device, oldImage, nil)
             if let oldMemory { vkFreeMemory(device, oldMemory, nil) }
             oldRelease?()
         }
 
-        invalidateComposite(id: id)
+        // The new image isn't in SHADER_READ_ONLY until the node's next draw.
+        readable.remove(id)
         return true
     }
 }

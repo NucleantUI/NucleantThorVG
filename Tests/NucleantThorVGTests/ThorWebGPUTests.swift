@@ -24,8 +24,8 @@ struct ThorWebGPUTests {
 
     @Test func widgetNodeHoldsWhatThorVGDrew() throws {
         let engine = try VulkanRenderEngine<ThorSlot>(canvasSelector: "#test-canvas", getSize: { (64, 48) })
-        let node = try #require(engine.makeThorWidgetNode(width: 32, height: 16))
-        defer { node.destroyResources(engine) }
+        let node = try #require(engine.renderDevice.makeThorWidgetNode(width: 32, height: 16))
+        defer { node.destroyResources(engine.renderDevice) }
         #expect(node.isExternallyBacked)
 
         try draw(node.canvas, rect: (0, 0, 16, 16), color: (255, 0, 0))
@@ -39,8 +39,8 @@ struct ThorWebGPUTests {
 
     @Test func redrawReplacesTheTargetsContent() throws {
         let engine = try VulkanRenderEngine<ThorSlot>(canvasSelector: "#test-canvas", getSize: { (64, 48) })
-        let node = try #require(engine.makeThorWidgetNode(width: 16, height: 16))
-        defer { node.destroyResources(engine) }
+        let node = try #require(engine.renderDevice.makeThorWidgetNode(width: 16, height: 16))
+        defer { node.destroyResources(engine.renderDevice) }
 
         let shape = try draw(node.canvas, rect: (0, 0, 16, 16), color: (255, 0, 0))
         // Recolored in place, then drawn again into the same texture.
@@ -55,11 +55,11 @@ struct ThorWebGPUTests {
 
     @Test func resizedNodeDrawsAtTheNewSize() throws {
         let engine = try VulkanRenderEngine<ThorSlot>(canvasSelector: "#test-canvas", getSize: { (64, 48) })
-        let node = try #require(engine.makeThorWidgetNode(width: 8, height: 8))
-        defer { node.destroyResources(engine) }
+        let node = try #require(engine.renderDevice.makeThorWidgetNode(width: 8, height: 8))
+        defer { node.destroyResources(engine.renderDevice) }
         let oldImage = node.image
 
-        #expect(engine.resizeThorNode(node, id: 1, width: 24, height: 12))
+        #expect(engine.renderDevice.resizeThorNode(node, id: 1, width: 24, height: 12))
         #expect(node.width == 24)
         #expect(node.height == 12)
         #expect(node.image != oldImage)
@@ -72,7 +72,7 @@ struct ThorWebGPUTests {
 
     @Test func engineCompositesAThorNode() throws {
         let engine = try VulkanRenderEngine<ThorSlot>(canvasSelector: "#test-canvas", getSize: { (64, 48) })
-        let node = try #require(engine.makeThorWidgetNode(width: 32, height: 24))
+        let node = try #require(engine.renderDevice.makeThorWidgetNode(width: 32, height: 24))
         let shape = TestRect()
         shape.append_rect(x: 4, y: 4, w: 24, h: 16)
         shape.set_fill_color(r: 255, g: 128, b: 0)
@@ -83,9 +83,10 @@ struct ThorWebGPUTests {
         // changed (a second draw of an unchanged canvas is refused).
         engine.drawFrame(1.0 / 60.0)
         engine.waitForPreviousFrame()
-        #expect(engine.readable.contains(1))
-        // The slot frees the node (and its target) on removal.
+        #expect(engine.renderDevice.readable.contains(1))
+        // The window only shows the node; its maker frees it (and its target).
         engine.remove(id: 1)
+        node.destroyResources(engine.renderDevice)
     }
 }
 #endif
