@@ -15,7 +15,7 @@ import CVulkan
 import CThorVG
 
 
-extension VulkanRenderEngine {
+extension VulkanRenderDevice {
 
     /// Build a whole self-contained ThorVG render target: a wgpu texture, a
     /// `Tvg_Canvas` targeting it, and a `ThorShaderNode` importing that
@@ -29,20 +29,20 @@ extension VulkanRenderEngine {
         height: Int
     ) -> ThorShaderNode<RenderNode>? {
         guard let wgpu = WgpuContext.shared else {
-            print("VulkanRenderEngine: no WgpuContext — thor node unbuildable")
+            print("VulkanRenderDevice: no WgpuContext — thor node unbuildable")
             return nil
         }
         guard let target = wgpu.makeTarget(width: width, height: height) else {
-            print("VulkanRenderEngine: wgpu target creation failed")
+            print("VulkanRenderDevice: wgpu target creation failed")
             return nil
         }
         guard let mtlTexture = target.nativeMetalTexture() else {
-            print("VulkanRenderEngine: wgpuTextureGetNativeMetalTexture returned null")
+            print("VulkanRenderDevice: wgpuTextureGetNativeMetalTexture returned null")
             target.release()
             return nil
         }
         guard let canvas = canvasBase ?? tvg_wgcanvas_create(TVG_ENGINE_OPTION_DEFAULT) else {
-            print("VulkanRenderEngine: tvg_wgcanvas_create failed")
+            print("VulkanRenderDevice: tvg_wgcanvas_create failed")
             target.release()
             return nil
         }
@@ -60,7 +60,7 @@ extension VulkanRenderEngine {
             height: height,
             storageCapable: storageCapable
         ) else {
-            print("VulkanRenderEngine: makeThorNode(importingMetalTexture:) failed")
+            print("VulkanRenderDevice: makeThorNode(importingMetalTexture:) failed")
             target.release()
             return nil
         }
@@ -76,7 +76,7 @@ extension VulkanRenderEngine {
             1
         )
         guard result == TVG_RESULT_SUCCESS else {
-            print("VulkanRenderEngine: tvg_wgcanvas_set_target failed (\(result))")
+            print("VulkanRenderDevice: tvg_wgcanvas_set_target failed (\(result))")
             target.release()
             return nil
         }
@@ -241,15 +241,14 @@ extension VulkanRenderEngine {
     /// Observation registration — so nothing above needs rebinding; only the
     /// backing image changes. A resize must not remake the node (that's for
     /// widget add/remove or a canvas swap). The old image/view/memory and wgpu
-    /// target are freed once the frames in flight are done with them
-    /// (`releaseAfterInFlightFrames`). Returns false — node untouched, still at
+    /// target are freed once the work in flight is done with them
+    /// (`releaseAfterInFlightWork`). Returns false — node untouched, still at
     /// the old size — on any failure, so the widget stays visible instead of
     /// going dark.
     ///
-    /// `id` is the node's composite slot id: the engine caches a sampler
-    /// descriptor per slot keyed on the assumption a node's imageView never
-    /// changes, so that cache is dropped here (`invalidateComposite`) to force
-    /// a rebuild from the new view.
+    /// `id` is the node's composite slot id: it is unpublished until the
+    /// node's next draw leaves the new image readable, and every window's
+    /// composite set rebuilds from the new view on its own.
     @discardableResult
     public func resizeThorNode(
         _ node: ThorShaderNode<RenderNode>,
@@ -262,15 +261,15 @@ extension VulkanRenderEngine {
         else { return true }   // already that size — nothing to do
 
         guard let wgpu = WgpuContext.shared else {
-            print("VulkanRenderEngine: no WgpuContext — thor node unresizable")
+            print("VulkanRenderDevice: no WgpuContext — thor node unresizable")
             return false
         }
         guard let target = wgpu.makeTarget(width: width, height: height) else {
-            print("VulkanRenderEngine: wgpu target creation failed (resize)")
+            print("VulkanRenderDevice: wgpu target creation failed (resize)")
             return false
         }
         guard let mtlTexture = target.nativeMetalTexture() else {
-            print("VulkanRenderEngine: wgpuTextureGetNativeMetalTexture returned null (resize)")
+            print("VulkanRenderDevice: wgpuTextureGetNativeMetalTexture returned null (resize)")
             target.release()
             return false
         }
@@ -287,7 +286,7 @@ extension VulkanRenderEngine {
                 storageCapable: node.storageCapable
             )
         } catch {
-            print("VulkanRenderEngine: imported image (resize) failed: \(error)")
+            print("VulkanRenderDevice: imported image (resize) failed: \(error)")
             target.release()
             return false
         }
@@ -305,8 +304,9 @@ extension VulkanRenderEngine {
             1
         )
         guard result == TVG_RESULT_SUCCESS else {
-            print("VulkanRenderEngine: tvg_wgcanvas_set_target failed on resize (\(result))")
-            vkDeviceWaitIdle(device)
+            print("VulkanRenderDevice: tvg_wgcanvas_set_target failed on resize (\(result))")
+            // Nothing has used the new image but its layout barrier, which
+            // `makeImportedImage` already waited for.
             vkDestroyImageView(device, created.view, nil)
             vkDestroyImage(device, created.image, nil)
             if let m = created.memory { vkFreeMemory(device, m, nil) }
@@ -332,23 +332,21 @@ extension VulkanRenderEngine {
         node.releaseExternal           = { target.release() }
         node.dirty                     = true
 
-        // Old backing + its wgpu target: freed once the frames that may still
-        // sample it are done, without stalling this one on the whole device
-        // going idle. ThorVG's last write into it was already waited for (the
-        // node's `waitForExternalCompletion`). Retarget-then-release order,
-        // same as node teardown.
+        // Old backing + its wgpu target: freed once the work that may still
+        // sample it, in any window, is done, without stalling on the whole
+        // device going idle. ThorVG's last write into it was already waited
+        // for (the node's `waitForExternalCompletion`). Retarget-then-release
+        // order, same as node teardown.
         let device = device
-        releaseAfterInFlightFrames {
+        releaseAfterInFlightWork {
             vkDestroyImageView(device, oldView, nil)
             vkDestroyImage(device, oldImage, nil)
             if let oldMemory { vkFreeMemory(device, oldMemory, nil) }
             oldRelease?()
         }
 
-        // Cached sampler descriptor still points at the freed view — drop it so
-        // the next frame rebuilds from the new one, and clear the slot's
-        // readable flag until the node's next draw makes the new image readable.
-        invalidateComposite(id: id)
+        // The new image isn't in SHADER_READ_ONLY until the node's next draw.
+        readable.remove(id)
         return true
     }
 }
