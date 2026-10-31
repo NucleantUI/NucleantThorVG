@@ -201,8 +201,8 @@ func getDepedencies() -> [Package.Dependency] {
     if devMode {
         deps.append(.package(path: "../NucleantVulkan"))
     } else {
-        // 0.0.2: the first with Windows.
-        deps.append(.package(url: "https://github.com/NucleantUI/NucleantVulkan", .upToNextMinor(from: "0.0.2")))
+        // 0.1.0: the shared VulkanRenderDevice the nodes take.
+        deps.append(.package(url: "https://github.com/NucleantUI/NucleantVulkan", .upToNextMajor(from: "0.1.0")))
     }
     //deps.append(.package(path: "../NucleantCore"))
     return deps
