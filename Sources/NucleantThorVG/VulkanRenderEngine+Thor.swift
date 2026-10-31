@@ -369,7 +369,7 @@ import CThorVG
 import WinSDK
 #endif
 
-extension VulkanRenderEngine {
+extension VulkanRenderDevice {
 
     /// Linux/Android mirror of the Apple `makeThorWidgetNode(adopting:width:height:)`
     /// above: a wgpu texture, a `Tvg_Canvas` targeting it, and a
@@ -391,36 +391,36 @@ extension VulkanRenderEngine {
         height: Int
     ) -> ThorShaderNode<RenderNode>? {
         guard let wgpu = WgpuContext.shared else {
-            print("VulkanRenderEngine: no WgpuContext — thor node unbuildable")
+            print("VulkanRenderDevice: no WgpuContext — thor node unbuildable")
             return nil
         }
         guard let target = wgpu.makeTarget(width: width, height: height) else {
-            print("VulkanRenderEngine: wgpu target creation failed")
+            print("VulkanRenderDevice: wgpu target creation failed")
             return nil
         }
         #if os(Android) && NUCLEANT_ANDROID_USE_AHARDWAREBUFFER
         guard let hardwareBuffer = target.nativeAndroidHardwareBuffer() else {
-            print("VulkanRenderEngine: wgpu target has no AHardwareBuffer — device may lack "
+            print("VulkanRenderDevice: wgpu target has no AHardwareBuffer — device may lack "
                   + "VK_ANDROID_external_memory_android_hardware_buffer")
             target.release()
             return nil
         }
         #elseif os(Windows)
         guard let handle = target.nativeVulkanExportedWin32Handle() else {
-            print("VulkanRenderEngine: wgpu target has no exported handle — driver may lack "
+            print("VulkanRenderDevice: wgpu target has no exported handle — driver may lack "
                   + "VK_KHR_external_memory_win32")
             target.release()
             return nil
         }
         #else
         guard let fd = target.nativeVulkanExportedFd() else {
-            print("VulkanRenderEngine: wgpu target has no exported fd — driver may lack VK_KHR_external_memory_fd")
+            print("VulkanRenderDevice: wgpu target has no exported fd — driver may lack VK_KHR_external_memory_fd")
             target.release()
             return nil
         }
         #endif
         guard let canvas = canvasBase ?? tvg_wgcanvas_create(TVG_ENGINE_OPTION_DEFAULT) else {
-            print("VulkanRenderEngine: tvg_wgcanvas_create failed")
+            print("VulkanRenderDevice: tvg_wgcanvas_create failed")
             target.release()
             return nil
         }
@@ -463,7 +463,7 @@ extension VulkanRenderEngine {
         )
         #endif
         guard let node = built else {
-            print("VulkanRenderEngine: importing thor node failed")
+            print("VulkanRenderDevice: importing thor node failed")
             target.release()
             return nil
         }
@@ -479,7 +479,7 @@ extension VulkanRenderEngine {
             1
         )
         guard result == TVG_RESULT_SUCCESS else {
-            print("VulkanRenderEngine: tvg_wgcanvas_set_target failed (\(result))")
+            print("VulkanRenderDevice: tvg_wgcanvas_set_target failed (\(result))")
             target.release()
             return nil
         }
@@ -927,7 +927,7 @@ extension VulkanRenderEngine {
     /// Linux/Android mirror of `resizeThorNode` above: mint a new wgpu target +
     /// imported VkImage at the new size via the fd-import path instead of
     /// Metal, and swap it into the same `ThorShaderNode`. See the Apple
-    /// version for the full rationale (identity, cache invalidation, etc.) —
+    /// version for the full rationale (identity, the slot's readable flag) —
     /// this only differs in how the new backing is created and imported.
     @discardableResult
     public func resizeThorNode(
@@ -941,28 +941,28 @@ extension VulkanRenderEngine {
         else { return true }
 
         guard let wgpu = WgpuContext.shared else {
-            print("VulkanRenderEngine: no WgpuContext — thor node unresizable")
+            print("VulkanRenderDevice: no WgpuContext — thor node unresizable")
             return false
         }
         guard let target = wgpu.makeTarget(width: width, height: height) else {
-            print("VulkanRenderEngine: wgpu target creation failed (resize)")
+            print("VulkanRenderDevice: wgpu target creation failed (resize)")
             return false
         }
         #if os(Android) && NUCLEANT_ANDROID_USE_AHARDWAREBUFFER
         guard let hardwareBuffer = target.nativeAndroidHardwareBuffer() else {
-            print("VulkanRenderEngine: wgpu target has no AHardwareBuffer (resize)")
+            print("VulkanRenderDevice: wgpu target has no AHardwareBuffer (resize)")
             target.release()
             return false
         }
         #elseif os(Windows)
         guard let handle = target.nativeVulkanExportedWin32Handle() else {
-            print("VulkanRenderEngine: wgpu target has no exported handle (resize)")
+            print("VulkanRenderDevice: wgpu target has no exported handle (resize)")
             target.release()
             return false
         }
         #else
         guard let fd = target.nativeVulkanExportedFd() else {
-            print("VulkanRenderEngine: wgpu target has no exported fd (resize)")
+            print("VulkanRenderDevice: wgpu target has no exported fd (resize)")
             target.release()
             return false
         }
@@ -980,7 +980,7 @@ extension VulkanRenderEngine {
             created = try makeImportedImage(fd: fd, width: width, height: height)
             #endif
         } catch {
-            print("VulkanRenderEngine: imported image (resize) failed: \(error)")
+            print("VulkanRenderDevice: imported image (resize) failed: \(error)")
             target.release()
             return false
         }
@@ -1001,7 +1001,7 @@ extension VulkanRenderEngine {
             1
         )
         guard result == TVG_RESULT_SUCCESS else {
-            print("VulkanRenderEngine: tvg_wgcanvas_set_target failed on resize (\(result))")
+            print("VulkanRenderDevice: tvg_wgcanvas_set_target failed on resize (\(result))")
             vkDeviceWaitIdle(device)
             vkDestroyImageView(device, created.view, nil)
             vkDestroyImage(device, created.image, nil)
@@ -1032,7 +1032,8 @@ extension VulkanRenderEngine {
         if let oldMemory { vkFreeMemory(device, oldMemory, nil) }
         oldRelease?()
 
-        invalidateComposite(id: id)
+        // The new image isn't in SHADER_READ_ONLY until the node's next draw.
+        readable.remove(id)
         return true
     }
 }
