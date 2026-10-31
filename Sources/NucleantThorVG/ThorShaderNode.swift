@@ -25,7 +25,7 @@ public final class ThorShaderNode<C: RenderContainerNode>: VulkanThorRenderNode 
     
     
     public typealias ContainerNode = C
-    public typealias Engine = VulkanRenderEngine<C>
+    public typealias Device = VulkanRenderDevice<C>
 
     public var canvas: ThorVulkanCanvas
     public var width:  UInt32
@@ -114,7 +114,7 @@ public final class ThorShaderNode<C: RenderContainerNode>: VulkanThorRenderNode 
 
 
 extension ThorShaderNode {
-    public func update(_ engine: Engine, slot: ContainerNode, cmd: VkCommandBuffer) {
+    public func update(_ device: Device, slot: ContainerNode, cmd: VkCommandBuffer) {
         // let id = ObjectIdentifier(node).hashValue
         // ^ replaced: the slot carries the canvas-owned id.
         let id = slot.id
@@ -125,7 +125,7 @@ extension ThorShaderNode {
         let drawResult = canvas.draw()
         let syncResult = drawResult == TVG_RESULT_SUCCESS ? canvas.sync() : drawResult
         guard drawResult == TVG_RESULT_SUCCESS, syncResult == TVG_RESULT_SUCCESS else {
-            if engine.warnedFailedNodes.insert(id).inserted {
+            if device.warnedFailedNodes.insert(id).inserted {
                 print("VulkanRenderEngine: thor node \(id) failed rendering (draw: \(drawResult), sync: \(syncResult)) — logged once; this repeats every frame if nothing is ever painted into the node's canvas")
             }
             return
@@ -209,23 +209,28 @@ extension ThorShaderNode {
             )
         }
         currentLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
-        engine.readable.insert(id)
+        device.readable.insert(id)
     }
 
     /// Free the image/view/memory this node owns. The wgpu texture an
     /// externally-backed image was imported from, and the `Tvg_Canvas`
     /// handed out to Python, are borrowed — the owning canvas releases
     /// those (after retargeting ThorVG away from the texture), not this.
-    public func destroyResources(_ engine: Engine) {
-        vkDeviceWaitIdle(engine.device)
-        vkDestroyImageView(engine.device, imageView, nil)
-        vkDestroyImage(engine.device, image, nil)
-        if let memory {
-            vkFreeMemory(engine.device, memory, nil)
+    /// Freed once the work in flight, in any window, is done with them.
+    public func destroyResources(_ device: Device) {
+        let vkDevice = device.device
+        let imageView = imageView, image = image, memory = memory
+        let releaseExternal = releaseExternal
+        device.releaseAfterInFlightWork {
+            vkDestroyImageView(vkDevice, imageView, nil)
+            vkDestroyImage(vkDevice, image, nil)
+            if let memory {
+                vkFreeMemory(vkDevice, memory, nil)
+            }
+            // Only now, with the aliasing VkImage gone, is it safe to drop the
+            // wgpu target backing it.
+            releaseExternal?()
         }
-        // Only now, with the aliasing VkImage gone, is it safe to drop the
-        // wgpu target backing it.
-        releaseExternal?()
     }
 }
 
