@@ -81,39 +81,39 @@ func androidABI() -> String {
 let releasedThorVG: [String: (url: String, checksum: String)] = [
     "ThorVG.xcframework.zip": (
         url: "https://github.com/NucleantUI/NucleantThorVG/releases/download/0.1.0/ThorVG.xcframework.zip",
-        checksum: "73acbea2ac363a9de3ab09e85e8b7eb5ebaa40cf639988af9d73b763a7e75b66"
+        checksum: "3b0c8b7e6efd3b03fe3516ffbc46341be9a68f12084018c0c50ba5a43ef12ae1"
     ),
     "ThorVG_lib.xcframework.zip": (
         url: "https://github.com/NucleantUI/NucleantThorVG/releases/download/0.1.0/ThorVG_lib.xcframework.zip",
-        checksum: "9a24d938ae6430fd60546d14ef44f3cc91973cd3666a94824f9f5f9f2b30e0ce"
+        checksum: "f2ca768fb9133d25bb7a23339e6199117a1583654f6800df5d59d1b08102b1c2"
     ),
     "libomp.xcframework.zip": (
         url: "https://github.com/NucleantUI/NucleantThorVG/releases/download/0.1.0/libomp.xcframework.zip",
-        checksum: "569194053e40d0e9d780b592cd2e76e16835b8ae4ec966cd2a347be56db80f20"
+        checksum: "38492600af66acc7082ca0f9714a93862de5d80bd364c433a785f0bbd0edbde5"
     ),
     "thorvg-android-arm64-v8a.artifactbundle.zip": (
         url: "https://github.com/NucleantUI/NucleantThorVG/releases/download/0.1.0/thorvg-android-arm64-v8a.artifactbundle.zip",
-        checksum: "f3904bf91cb2a2ddb75c26732258400b2961d3b849e629102e417265f425b7a5"
+        checksum: "6f92f12baaf922b7d2e40df94dad873a461fd6f6f29bf4ba8962cc247547bba2"
     ),
     "thorvg-android-x86_64.artifactbundle.zip": (
         url: "https://github.com/NucleantUI/NucleantThorVG/releases/download/0.1.0/thorvg-android-x86_64.artifactbundle.zip",
-        checksum: "f2c26a6379b85a8907a63fa5cb01d8de6d637386d063951b52b374a1c718cf3d"
+        checksum: "353c2b03f482be5b24b0e03dd7d7b81ddcf860832cd95bb07d9a0253e023baa6"
     ),
     "thorvg-linux-aarch64.artifactbundle.zip": (
         url: "https://github.com/NucleantUI/NucleantThorVG/releases/download/0.1.0/thorvg-linux-aarch64.artifactbundle.zip",
-        checksum: "98620238d890020fc4ff76c8e78f3a83d2d7938c80865cb51ae5cc4ab884c02b"
+        checksum: "ff66001ffb0e4c5efca131b257eed0e307c6e9b3b78bf324924046951240a860"
     ),
     "thorvg-linux-x86_64.artifactbundle.zip": (
         url: "https://github.com/NucleantUI/NucleantThorVG/releases/download/0.1.0/thorvg-linux-x86_64.artifactbundle.zip",
-        checksum: "caefe714d7824898fdc013c5edc747807ec0b395eee400027e7153515a036ed6"
+        checksum: "c19fa83f6244d2f4b16582b74326b2af86244d9b7972dfedca9605d4559f49b6"
     ),
     "thorvg-wasm32.artifactbundle.zip": (
         url: "https://github.com/NucleantUI/NucleantThorVG/releases/download/0.1.0/thorvg-wasm32.artifactbundle.zip",
-        checksum: "2bea14dff5f01db0ac4e14bb56e75c5bd0e5093fd858a34e2a0ebf4ecb1219f9"
+        checksum: "795f6b9facc313debead91833036246211b38b2dcfe51fef1351bbe7541e8f2f"
     ),
     "thorvg-windows-x86_64.artifactbundle.zip": (
         url: "https://github.com/NucleantUI/NucleantThorVG/releases/download/0.1.0/thorvg-windows-x86_64.artifactbundle.zip",
-        checksum: "0be8b8d83dd71b521ba6dc77d54a9259a0038e0da4d0c605942a0d4bdf01a260"
+        checksum: "abffa377f615fdea77d470b04b05407bcae8936affc31ad494d3dc0a4dbed0c0"
     ),
 ]
 
